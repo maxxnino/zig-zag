@@ -1,5 +1,6 @@
 const std = @import("std");
-const Vec2 = @import("Vec2.zig").Vec2;
+const za = @import("zalgebra");
+const Vec2 = za.Vec2;
 const AABB = struct {
     upper_bound: Vec2,
     lower_bound: Vec2,
