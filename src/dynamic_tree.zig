@@ -1,18 +1,17 @@
 const std = @import("std");
-const Aabb = @import("aabb.zig").Aabb;
+const Rect = @import("rect.zig").Rect;
 
 const assert = std.debug.assert;
-
 pub fn TreeNode(comptime T: type) type {
     return struct {
-        aabb: AABB,
+        aabb: Aabb,
         height: i32 = -1,
         child1: ?u32 = null,
         child2: ?u32 = null,
         parent: ?u32 = null,
         move: bool = true,
 
-        const AABB = Aabb(T);
+        const Aabb = Rect(T);
         const Self = @This();
 
         pub fn isLeaf(self: Self) bool {
@@ -28,7 +27,7 @@ pub fn DynamicTree(comptime T: type) type {
         m_freeList: std.ArrayList(u32),
 
         pub const Node = TreeNode(T);
-        pub const AABB = Node.AABB;
+        pub const Aabb = Node.Aabb;
         const Self = @This();
 
         pub fn init(allocator: *std.mem.Allocator) Self {
@@ -41,14 +40,14 @@ pub fn DynamicTree(comptime T: type) type {
             self.m_nodes.deinit();
             self.m_freeList.deinit();
         }
-        pub fn query(self: Self, aabb: AABB, callback: anytype) void {
+        pub fn query(self: Self, aabb: Aabb, callback: anytype) void {
             var stack = std.ArrayList(?u32).init(std.testing.allocator);
+            defer stack.deinit();
             stack.append(self.m_root) catch unreachable;
             while (stack.items.len > 0) {
                 const node_id = stack.pop();
-                if (node_id == null) {
-                    continue;
-                }
+                if (node_id == null) continue;
+
                 const node = self.m_nodes.items[node_id.?];
 
                 if (node.aabb.testOverlap(aabb)) {
@@ -68,7 +67,7 @@ pub fn DynamicTree(comptime T: type) type {
             std.debug.print("m_freeList: {any}\n", .{self.m_freeList.items});
         }
 
-        pub fn addNode(self: *Self, aabb: AABB) u32 {
+        pub fn addNode(self: *Self, aabb: Aabb) u32 {
             const node_id = self.allocateNode();
             var node = &self.m_nodes.items[node_id];
             node.aabb = aabb;
@@ -86,7 +85,7 @@ pub fn DynamicTree(comptime T: type) type {
             const node_id = self.m_freeList.popOrNull();
             if (node_id == null) {
                 self.m_nodes.append(Node{
-                    .aabb = AABB.zero(),
+                    .aabb = Aabb.zero(),
                 }) catch unreachable;
                 return @intCast(u32, self.m_nodes.items.len - 1);
             }
@@ -110,7 +109,7 @@ pub fn DynamicTree(comptime T: type) type {
             }
 
             // Find the best sibling for this node
-            var leafAABB = m_nodes[leaf].aabb;
+            const leaf_aabb = m_nodes[leaf].aabb;
             var index = self.m_root.?;
             while (m_nodes[index].isLeaf() == false) {
                 const child1 = m_nodes[index].child1.?;
@@ -118,7 +117,7 @@ pub fn DynamicTree(comptime T: type) type {
 
                 const area = m_nodes[index].aabb.getPerimeter();
 
-                const combined_aabb = AABB.combine(m_nodes[index].aabb, leafAABB);
+                const combined_aabb = Aabb.combine(m_nodes[index].aabb, leaf_aabb);
                 const combined_area = combined_aabb.getPerimeter();
 
                 // Cost of creating a new parent for this node and the new leaf
@@ -130,10 +129,10 @@ pub fn DynamicTree(comptime T: type) type {
                 // Cost of descending into child1
                 var cost1: T = undefined;
                 if (m_nodes[child1].isLeaf()) {
-                    const aabb = AABB.combine(leafAABB, m_nodes[child1].aabb);
+                    const aabb = Aabb.combine(leaf_aabb, m_nodes[child1].aabb);
                     cost1 = aabb.getPerimeter() + inheritance_cost;
                 } else {
-                    const aabb = AABB.combine(leafAABB, m_nodes[child1].aabb);
+                    const aabb = Aabb.combine(leaf_aabb, m_nodes[child1].aabb);
                     const old_area = m_nodes[child1].aabb.getPerimeter();
                     const new_area = aabb.getPerimeter();
                     cost1 = (new_area - old_area) + inheritance_cost;
@@ -142,10 +141,10 @@ pub fn DynamicTree(comptime T: type) type {
                 // Cost of descending into child2
                 var cost2: T = undefined;
                 if (m_nodes[child2].isLeaf()) {
-                    const aabb = AABB.combine(leafAABB, m_nodes[child2].aabb);
+                    const aabb = Aabb.combine(leaf_aabb, m_nodes[child2].aabb);
                     cost2 = aabb.getPerimeter() + inheritance_cost;
                 } else {
-                    const aabb = AABB.combine(leafAABB, m_nodes[child2].aabb);
+                    const aabb = Aabb.combine(leaf_aabb, m_nodes[child2].aabb);
                     const old_area = m_nodes[child2].aabb.getPerimeter();
                     const new_area = aabb.getPerimeter();
                     cost2 = new_area - old_area + inheritance_cost;
@@ -169,7 +168,7 @@ pub fn DynamicTree(comptime T: type) type {
             const new_parent = self.allocateNode();
             m_nodes = self.m_nodes.items;
             m_nodes[new_parent].parent = old_parent;
-            m_nodes[new_parent].aabb = AABB.combine(leafAABB, m_nodes[sibling].aabb);
+            m_nodes[new_parent].aabb = Aabb.combine(leaf_aabb, m_nodes[sibling].aabb);
             m_nodes[new_parent].height = m_nodes[sibling].height + 1;
 
             if (old_parent != null) {
@@ -209,7 +208,7 @@ pub fn DynamicTree(comptime T: type) type {
                     m_nodes[child1.?].height,
                     m_nodes[child2.?].height,
                 );
-                m_nodes[i.?].aabb = AABB.combine(m_nodes[child1.?].aabb, m_nodes[child2.?].aabb);
+                m_nodes[i.?].aabb = Aabb.combine(m_nodes[child1.?].aabb, m_nodes[child2.?].aabb);
             }
         }
         fn balance(self: *Self, node_id: ?u32) u32 {
@@ -234,9 +233,9 @@ pub fn DynamicTree(comptime T: type) type {
 
             // Rotate C up
             if (balance_height > 1) {
-                const iF = c.child1.?;
+                const @"if" = c.child1.?;
                 const ig = c.child2.?;
-                var f = &m_nodes[iF];
+                var f = &m_nodes[@"if"];
                 var g = &m_nodes[ig];
                 // TODO: b2Assert(0 <= iF && iF < m_nodeCapacity);
                 //b2Assert(0 <= iG && iG < m_nodeCapacity);
@@ -262,20 +261,20 @@ pub fn DynamicTree(comptime T: type) type {
 
                 // Rotate
                 if (f.height > g.height) {
-                    c.child2 = iF;
+                    c.child2 = @"if";
                     a.child2 = ig;
                     g.parent = ia;
-                    a.aabb = AABB.combine(b.aabb, g.aabb);
-                    c.aabb = AABB.combine(a.aabb, f.aabb);
+                    a.aabb = Aabb.combine(b.aabb, g.aabb);
+                    c.aabb = Aabb.combine(a.aabb, f.aabb);
 
                     a.height = 1 + std.math.max(b.height, g.height);
                     c.height = 1 + std.math.max(a.height, f.height);
                 } else {
                     c.child2 = ig;
-                    a.child2 = iF;
+                    a.child2 = @"if";
                     f.parent = ia;
-                    a.aabb = AABB.combine(b.aabb, f.aabb);
-                    c.aabb = AABB.combine(a.aabb, g.aabb);
+                    a.aabb = Aabb.combine(b.aabb, f.aabb);
+                    c.aabb = Aabb.combine(a.aabb, g.aabb);
 
                     a.height = 1 + std.math.max(b.height, f.height);
                     c.height = 1 + std.math.max(a.height, g.height);
@@ -317,8 +316,8 @@ pub fn DynamicTree(comptime T: type) type {
                     b.child2 = id;
                     a.child1 = ie;
                     e.parent = ia;
-                    a.aabb = AABB.combine(c.aabb, e.aabb);
-                    b.aabb = AABB.combine(a.aabb, d.aabb);
+                    a.aabb = Aabb.combine(c.aabb, e.aabb);
+                    b.aabb = Aabb.combine(a.aabb, d.aabb);
 
                     a.height = 1 + std.math.max(c.height, e.height);
                     b.height = 1 + std.math.max(a.height, d.height);
@@ -326,8 +325,8 @@ pub fn DynamicTree(comptime T: type) type {
                     b.child2 = ie;
                     a.child1 = id;
                     d.parent = ia;
-                    a.aabb = AABB.combine(c.aabb, d.aabb);
-                    b.aabb = AABB.combine(a.aabb, e.aabb);
+                    a.aabb = Aabb.combine(c.aabb, d.aabb);
+                    b.aabb = Aabb.combine(a.aabb, e.aabb);
 
                     a.height = 1 + std.math.max(c.height, d.height);
                     b.height = 1 + std.math.max(a.height, e.height);
@@ -373,7 +372,7 @@ pub fn DynamicTree(comptime T: type) type {
                     const child1 = m_nodes[index.?].child1.?;
                     const child2 = m_nodes[index.?].child2.?;
 
-                    m_nodes[index.?].aabb = AABB.combine(
+                    m_nodes[index.?].aabb = Aabb.combine(
                         m_nodes[child1].aabb,
                         m_nodes[child2].aabb,
                     );
@@ -399,40 +398,41 @@ fn queryCallback(node_id: u32) bool {
 }
 
 test "Dynamic Tree add/remove Node" {
-    var dt = DynamicTree.init(std.testing.allocator);
-    defer dt.deinit();
-    const AABB = DynamicTree.AABB;
-    const Vec2 = AABB.Vec2;
-    const aabb = AABB.new(
-        Vec2.new(4, 4),
-        Vec2.new(1, 1),
-    );
-    const aabb1 = AABB.new(
-        Vec2.new(3, 3),
-        Vec2.new(2, 2),
-    );
+//     const DyT = DynamicTree(i32);
+//     var dt = DyT.init(std.testing.allocator);
+//     defer dt.deinit();
+//     const Aabb = DyT.Aabb;
+//     const Vec2 = Aabb.Vec2;
+//     const aabb = Aabb.new(
+//         Vec2.new(1, 1),
+//         Vec2.new(3, 3),
+//     );
+//     const aabb1 = Aabb.new(
+//         Vec2.new(2, 2),
+//         Vec2.new(4, 4),
+//     );
 
-    std.debug.print("==== query 1 ====\n", .{});
-    dt.query(aabb1, queryCallback);
+//     std.debug.print("==== query 1 ====\n", .{});
+//     dt.query(aabb1, queryCallback);
 
-    var id = dt.addNode(aabb);
+//     var id = dt.addNode(aabb);
 
-    std.debug.print("==== query 2 ====\n", .{});
-    dt.query(aabb1, queryCallback);
+//     std.debug.print("==== query 2 ====\n", .{});
+//     dt.query(aabb1, queryCallback);
 
-    id = dt.addNode(aabb);
-    dt.removeNode(id);
+//     id = dt.addNode(aabb);
+//     dt.removeNode(id);
 
-    std.debug.print("==== query 3 ====\n", .{});
-    dt.query(aabb1, queryCallback);
+//     std.debug.print("==== query 3 ====\n", .{});
+//     dt.query(aabb1, queryCallback);
 
-    id = dt.addNode(aabb);
+//     id = dt.addNode(aabb);
 
-    std.debug.print("==== query 4 ====\n", .{});
-    dt.query(aabb1, queryCallback);
+//     std.debug.print("==== query 4 ====\n", .{});
+//     dt.query(aabb1, queryCallback);
 
-    dt.removeNode(id);
+//     dt.removeNode(id);
 
-    std.debug.print("==== query 5 ====\n", .{});
-    dt.query(aabb1, queryCallback);
+//     std.debug.print("==== query 5 ====\n", .{});
+//     dt.query(aabb1, queryCallback);
 }

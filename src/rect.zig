@@ -1,22 +1,23 @@
+const std = @import("std");
+const testing = std.testing;
+const Vector2 = @import("zalgebra").Vector2;
 const za = @import("zalgebra");
+pub const RectInt = Rect(i32);
+pub const RectFloat = Rect(f32);
 
-pub fn Aabb(comptime T: type) type {
-    if (@typeInfo(T) != .Float and @typeInfo(T) != .Int) {
-        @compileError("Aabb not implemented for " ++ @typeName(T));
-    }
-
+pub fn Rect(comptime T: type) type {
     return struct {
-        pub const Vec2 = za.Vector2(T);
+        pub const Vec2 = Vector2(T);
         const Self = @This();
 
-        upper_bound: Vec2,
         lower_bound: Vec2,
+        upper_bound: Vec2,
 
-        /// Contruct Aabb form given 2 Vector2
-        pub fn new(upper_bound: Vec2, lower_bound: Vec2) Self {
+        /// Contruct Rectangle form given 2 Vector2
+        pub fn new(lower_bound: Vec2, upper_bound: Vec2) Self {
             return .{
-                .upper_bound = upper_bound,
                 .lower_bound = lower_bound,
+                .upper_bound = upper_bound,
             };
         }
 
@@ -31,8 +32,8 @@ pub fn Aabb(comptime T: type) type {
         /// Contruct new aabb with 2 given aabb
         pub fn combine(a: Self, b: Self) Self {
             return Self.new(
-                Vec2.max(a.upper_bound, b.upper_bound),
                 Vec2.min(a.lower_bound, b.lower_bound),
+                Vec2.max(a.upper_bound, b.upper_bound),
             );
         }
 
@@ -46,4 +47,22 @@ pub fn Aabb(comptime T: type) type {
             return Self.new(Vec2.zero(), Vec2.zero());
         }
     };
+}
+
+test "basic" {
+    const Vec2 = RectInt.Vec2;
+
+    const v1 = Vec2.new(1, 1);
+    const v2 = Vec2.new(3, 3);
+    const v3 = Vec2.new(2, 2);
+    const v4 = Vec2.new(4, 4);
+
+    const a1 = RectInt.new(v1, v2);
+    const a2 = RectInt.new(v3, v4);
+
+    try testing.expect(a1.testOverlap(a2));
+    try testing.expect(a1.getPerimeter() == 8);
+
+    const a3 = a1.combine(a2);
+    try testing.expect(a3.lower_bound.eql(v1) and a3.upper_bound.eql(v4));
 }
