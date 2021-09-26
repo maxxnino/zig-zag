@@ -2,76 +2,81 @@ const std = @import("std");
 const Rect = @import("rect.zig").Rect;
 
 const assert = std.debug.assert;
-pub fn TreeNode(comptime T: type) type {
-    return struct {
-        aabb: Aabb,
-        height: i32 = -1,
-        child1: ?u32 = null,
-        child2: ?u32 = null,
-        parent: ?u32 = null,
-        move: bool = true,
-
-        const Aabb = Rect(T);
-        const Self = @This();
-
-        pub fn isLeaf(self: Self) bool {
-            return self.child1 == null;
-        }
-    };
-}
 
 pub fn DynamicTree(comptime T: type) type {
     return struct {
-        m_root: ?u32 = null,
-        m_nodes: std.ArrayList(Node),
-        m_freeList: std.ArrayList(u32),
+        const NodeList = std.MultiArrayList(struct { child1: u32, child2: u32, parent: u32, height: i16, aabb: Aabb });
+        const node_null = std.math.maxInt(u32);
 
-        pub const Node = TreeNode(T);
-        pub const Aabb = Node.Aabb;
+        root: u32,
+        free_list: u32,
+        node_list: NodeList,
+        heights: []i16,
+        parents: []u32,
+        child1s: []u32,
+        child2s: []u32,
+        aabbs: []Aabb,
+        allocator: *std.mem.Allocator,
+
+        pub const Aabb = Rect(T);
         const Self = @This();
 
         pub fn init(allocator: *std.mem.Allocator) Self {
             return .{
-                .m_nodes = std.ArrayList(Node).init(allocator),
-                .m_freeList = std.ArrayList(u32).init(allocator),
+                .root = node_null,
+                .free_list = node_null,
+                .node_list = NodeList{},
+                .heights = undefined,
+                .parents = undefined,
+                .child1s = undefined,
+                .child2s = undefined,
+                .aabbs = undefined,
+                .allocator = allocator,
             };
         }
+
         pub fn deinit(self: *Self) void {
-            self.m_nodes.deinit();
-            self.m_freeList.deinit();
+            self.node_list.deinit(self.allocator);
         }
+
         pub fn query(self: Self, aabb: Aabb, callback: anytype) void {
-            var stack = std.ArrayList(?u32).init(std.testing.allocator);
+            var stack = std.ArrayList(u32).init(self.allocator);
             defer stack.deinit();
-            stack.append(self.m_root) catch unreachable;
+            stack.append(self.root) catch unreachable;
             while (stack.items.len > 0) {
                 const node_id = stack.pop();
-                if (node_id == null) continue;
+                if (node_id == node_null) continue;
 
-                const node = self.m_nodes.items[node_id.?];
-
-                if (node.aabb.testOverlap(aabb)) {
-                    if (node.isLeaf()) {
-                        const proceed = callback(node_id.?);
+                if (self.aabbs[node_id].testOverlap(aabb)) {
+                    if (self.isLeaf(node_id)) {
+                        const proceed = callback(node_id);
                         if (proceed == false) return;
                     } else {
-                        stack.append(node.child1) catch unreachable;
-                        stack.append(node.child2) catch unreachable;
+                        stack.append(self.child1s[node_id]) catch unreachable;
+                        stack.append(self.child2s[node_id]) catch unreachable;
                     }
                 }
             }
         }
 
-        pub fn print(self: Self) void {
-            std.debug.print("m_nodes: {any}\n", .{self.m_nodes.items});
-            std.debug.print("m_freeList: {any}\n", .{self.m_freeList.items});
+        pub fn print(self: Self, extra: []const u8) void {
+            std.debug.print("==== {s} ====\n", .{extra});
+            std.debug.print("height: {any}\n", .{self.heights});
+            std.debug.print("child1: {any}\n", .{self.child1s});
+            std.debug.print("child2: {any}\n", .{self.child2s});
+            std.debug.print("parent: {any}\n", .{self.parents});
+            var next = self.free_list;
+            std.debug.print("free_list: ", .{});
+            while (next != node_null) : (next = self.child1s[next]) {
+                std.debug.print("{},", .{next});
+            }
+            std.debug.print("\n", .{});
         }
 
         pub fn addNode(self: *Self, aabb: Aabb) u32 {
             const node_id = self.allocateNode();
-            var node = &self.m_nodes.items[node_id];
-            node.aabb = aabb;
-            node.height = 0;
+            self.aabbs[node_id] = aabb;
+            self.heights[node_id] = 0;
             self.insertLeaf(node_id);
             return node_id;
         }
@@ -82,42 +87,72 @@ pub fn DynamicTree(comptime T: type) type {
         }
 
         fn allocateNode(self: *Self) u32 {
-            const node_id = self.m_freeList.popOrNull();
-            if (node_id == null) {
-                self.m_nodes.append(Node{
-                    .aabb = Aabb.zero(),
-                }) catch unreachable;
-                return @intCast(u32, self.m_nodes.items.len - 1);
+            const node_id = self.popFreeNode();
+            if (node_id) |value| {
+                self.heights[value] = 0;
+                self.parents[value] = node_null;
+                self.child1s[value] = node_null;
+                self.child2s[value] = node_null;
+                return value;
             }
-            return node_id.?;
+
+            self.node_list.append(self.allocator, .{
+                .parent = node_null,
+                .child1 = node_null,
+                .child2 = node_null,
+                .height = 0,
+                .aabb = Aabb.zero(),
+            }) catch unreachable;
+            var slice = self.node_list.slice();
+            self.parents = slice.items(.parent);
+            self.child1s = slice.items(.child1);
+            self.child2s = slice.items(.child2);
+            self.heights = slice.items(.height);
+            self.aabbs = slice.items(.aabb);
+            return @intCast(u32, self.node_list.len - 1);
+        }
+
+        fn addFreeNode(self: *Self, free_node_index: u32) void {
+            self.child1s[free_node_index] = self.free_list;
+            self.free_list = free_node_index;
+        }
+
+        fn popFreeNode(self: *Self) ?u32 {
+            if (self.free_list == node_null) return null;
+            const first = self.free_list;
+            self.free_list = self.child1s[first];
+            return first;
         }
 
         fn freeNode(self: *Self, node_id: u32) void {
             // TODO: b2Assert(0 <= nodeId && nodeId < m_nodeCapacity);
-            // b2Assert(0 < m_nodeCount);
-            self.m_freeList.append(node_id) catch unreachable;
-            self.m_nodes.items[node_id].height = -1;
+            self.heights[node_id] = -1;
+            self.child1s[node_id] = node_null;
+            self.addFreeNode(node_id);
+        }
+
+        fn isLeaf(self: Self, node_id: u32) bool {
+            return self.child1s[node_id] == node_null;
         }
 
         fn insertLeaf(self: *Self, leaf: u32) void {
             // TODO: what is this? self.m_insertionCount += 1;
-            var m_nodes = self.m_nodes.items;
-            if (self.m_root == null) {
-                self.m_root = leaf;
-                m_nodes[leaf].parent = null;
+            if (self.root == node_null) {
+                self.root = leaf;
+                self.parents[leaf] = node_null;
                 return;
             }
 
             // Find the best sibling for this node
-            const leaf_aabb = m_nodes[leaf].aabb;
-            var index = self.m_root.?;
-            while (m_nodes[index].isLeaf() == false) {
-                const child1 = m_nodes[index].child1.?;
-                const child2 = m_nodes[index].child2.?;
+            const leaf_aabb = self.aabbs[leaf];
+            var index = self.root;
+            while (self.isLeaf(index) == false) {
+                const child1 = self.child1s[index];
+                const child2 = self.child2s[index];
 
-                const area = m_nodes[index].aabb.getPerimeter();
+                const area = self.aabbs[index].getPerimeter();
 
-                const combined_aabb = Aabb.combine(m_nodes[index].aabb, leaf_aabb);
+                const combined_aabb = leaf_aabb.combine(self.aabbs[index]);
                 const combined_area = combined_aabb.getPerimeter();
 
                 // Cost of creating a new parent for this node and the new leaf
@@ -127,28 +162,30 @@ pub fn DynamicTree(comptime T: type) type {
                 const inheritance_cost = 2 * (combined_area - area);
 
                 // Cost of descending into child1
-                var cost1: T = undefined;
-                if (m_nodes[child1].isLeaf()) {
-                    const aabb = Aabb.combine(leaf_aabb, m_nodes[child1].aabb);
-                    cost1 = aabb.getPerimeter() + inheritance_cost;
-                } else {
-                    const aabb = Aabb.combine(leaf_aabb, m_nodes[child1].aabb);
-                    const old_area = m_nodes[child1].aabb.getPerimeter();
-                    const new_area = aabb.getPerimeter();
-                    cost1 = (new_area - old_area) + inheritance_cost;
-                }
+                const cost1 = blk: {
+                    if (self.isLeaf(child1)) {
+                        const aabb = leaf_aabb.combine(self.aabbs[child1]);
+                        break :blk aabb.getPerimeter() + inheritance_cost;
+                    } else {
+                        const aabb = leaf_aabb.combine(self.aabbs[child1]);
+                        const old_area = self.aabbs[child1].getPerimeter();
+                        const new_area = aabb.getPerimeter();
+                        break :blk (new_area - old_area) + inheritance_cost;
+                    }
+                };
 
                 // Cost of descending into child2
-                var cost2: T = undefined;
-                if (m_nodes[child2].isLeaf()) {
-                    const aabb = Aabb.combine(leaf_aabb, m_nodes[child2].aabb);
-                    cost2 = aabb.getPerimeter() + inheritance_cost;
-                } else {
-                    const aabb = Aabb.combine(leaf_aabb, m_nodes[child2].aabb);
-                    const old_area = m_nodes[child2].aabb.getPerimeter();
-                    const new_area = aabb.getPerimeter();
-                    cost2 = new_area - old_area + inheritance_cost;
-                }
+                const cost2 = blk: {
+                    if (self.isLeaf(child2)) {
+                        const aabb = leaf_aabb.combine(self.aabbs[child2]);
+                        break :blk aabb.getPerimeter() + inheritance_cost;
+                    } else {
+                        const aabb = leaf_aabb.combine(self.aabbs[child2]);
+                        const old_area = self.aabbs[child2].getPerimeter();
+                        const new_area = aabb.getPerimeter();
+                        break :blk new_area - old_area + inheritance_cost;
+                    }
+                };
 
                 // Descend according to the minimum cost.
                 if (cost < cost1 and cost < cost2) break;
@@ -164,120 +201,112 @@ pub fn DynamicTree(comptime T: type) type {
             const sibling = index;
 
             // Create a new parent.
-            const old_parent = m_nodes[sibling].parent;
+            const old_parent = self.parents[sibling];
             const new_parent = self.allocateNode();
-            m_nodes = self.m_nodes.items;
-            m_nodes[new_parent].parent = old_parent;
-            m_nodes[new_parent].aabb = Aabb.combine(leaf_aabb, m_nodes[sibling].aabb);
-            m_nodes[new_parent].height = m_nodes[sibling].height + 1;
+            self.parents[new_parent] = old_parent;
+            self.aabbs[new_parent] = leaf_aabb.combine(self.aabbs[sibling]);
+            self.heights[new_parent] = self.heights[sibling] + 1;
 
-            if (old_parent != null) {
+            if (old_parent != node_null) {
                 // The sibling was not the root.
-                if (m_nodes[old_parent.?].child1 == sibling) {
-                    m_nodes[old_parent.?].child1 = new_parent;
+                if (self.child1s[old_parent] == sibling) {
+                    self.child1s[old_parent] = new_parent;
                 } else {
-                    m_nodes[old_parent.?].child2 = new_parent;
+                    self.child2s[old_parent] = new_parent;
                 }
 
-                m_nodes[new_parent].child1 = sibling;
-                m_nodes[new_parent].child2 = leaf;
-                m_nodes[sibling].parent = new_parent;
-                m_nodes[leaf].parent = new_parent;
+                self.child1s[new_parent] = sibling;
+                self.child2s[new_parent] = leaf;
+                self.parents[sibling] = new_parent;
+                self.parents[leaf] = new_parent;
             } else {
                 // The sibling was the root.
-                m_nodes[new_parent].child1 = sibling;
-                m_nodes[new_parent].child2 = leaf;
-                m_nodes[sibling].parent = new_parent;
-                m_nodes[leaf].parent = new_parent;
-                self.m_root = new_parent;
+                self.child1s[new_parent] = sibling;
+                self.child2s[new_parent] = leaf;
+                self.parents[sibling] = new_parent;
+                self.parents[leaf] = new_parent;
+                self.root = new_parent;
             }
 
             // Walk back up the tree fixing heights and AABBs
-            var i = m_nodes[leaf].parent;
-            while (i != null) : (i = m_nodes[i.?].parent) {
-                i = self.balance(i.?);
+            var i = self.parents[leaf];
+            while (i != node_null) : (i = self.parents[i]) {
+                i = self.balance(i);
 
-                var child1 = m_nodes[i.?].child1;
-                var child2 = m_nodes[i.?].child2;
+                const child1 = self.child1s[i];
+                const child2 = self.child2s[i];
 
-                // TODO: b2Assert(child1 != b2_nullNode);
-                assert(child1 != null);
-                //b2Assert(child2 != b2_nullNode);
+                assert(child1 != node_null);
 
-                m_nodes[i.?].height = 1 + std.math.max(
-                    m_nodes[child1.?].height,
-                    m_nodes[child2.?].height,
+                self.heights[i] = 1 + std.math.max(
+                    self.heights[child1],
+                    self.heights[child2],
                 );
-                m_nodes[i.?].aabb = Aabb.combine(m_nodes[child1.?].aabb, m_nodes[child2.?].aabb);
+                self.aabbs[i] = self.aabbs[child1].combine(self.aabbs[child2]);
             }
         }
-        fn balance(self: *Self, node_id: ?u32) u32 {
-
-            // TODO: assert(iA != b2_nullNode);
-            assert(node_id != null);
-            const ia = node_id.?;
-            var m_nodes = self.m_nodes.items;
-            var a = &m_nodes[ia];
-            if (a.isLeaf() and a.height < 2) {
+        fn balance(self: *Self, node_id: u32) u32 {
+            assert(node_id != node_null);
+            const ia = node_id;
+            if (self.isLeaf(ia) and self.heights[ia] < 2) {
                 return ia;
             }
 
-            const ib = a.child1.?;
-            const ic = a.child2.?;
+            const ib = self.child1s[ia];
+            const ic = self.child2s[ia];
             // TODO: b2Assert(0 <= iB && iB < m_nodeCapacity);
             //b2Assert(0 <= iC && iC < m_nodeCapacity);
 
-            var b = &m_nodes[ib];
-            var c = &m_nodes[ic];
-            const balance_height = c.height - b.height;
+            // var b = &self.nodes[ib];
+            // var c = &self.nodes[ic];
+            const balance_height = self.heights[ic] - self.heights[ib];
 
             // Rotate C up
             if (balance_height > 1) {
-                const @"if" = c.child1.?;
-                const ig = c.child2.?;
-                var f = &m_nodes[@"if"];
-                var g = &m_nodes[ig];
+                const @"if" = self.child1s[ic];
+                const ig = self.child2s[ic];
+                // var f = &self.nodes[@"if"];
+                // var g = &self.nodes[ig];
                 // TODO: b2Assert(0 <= iF && iF < m_nodeCapacity);
                 //b2Assert(0 <= iG && iG < m_nodeCapacity);
 
                 // Swap A and C
-                c.child1 = ia;
-                c.parent = a.parent;
-                a.parent = ic;
+                self.child1s[ic] = ia;
+                self.parents[ic] = self.parents[ia];
+                self.parents[ia] = ic;
 
                 // A's old parent should point to C
-                if (c.parent != null) {
-                    const c_parent = c.parent.?;
-                    if (m_nodes[c_parent].child1 == ia) {
-                        m_nodes[c_parent].child1 = ic;
+                if (self.parents[ic] != node_null) {
+                    const c_parent = self.parents[ic];
+                    if (self.child1s[c_parent] == ia) {
+                        self.child1s[c_parent] = ic;
                     } else {
-                        // TODO: b2Assert(m_nodes[C.parent].child2 == iA);
-                        assert(m_nodes[c.parent.?].child2.? == ia);
-                        m_nodes[c_parent].child2 = ic;
+                        assert(self.child2s[c_parent] == ia);
+                        self.child2s[c_parent] = ic;
                     }
                 } else {
-                    self.m_root = ic;
+                    self.root = ic;
                 }
 
                 // Rotate
-                if (f.height > g.height) {
-                    c.child2 = @"if";
-                    a.child2 = ig;
-                    g.parent = ia;
-                    a.aabb = Aabb.combine(b.aabb, g.aabb);
-                    c.aabb = Aabb.combine(a.aabb, f.aabb);
+                if (self.heights[@"if"] > self.heights[ig]) {
+                    self.child2s[ic] = @"if";
+                    self.child2s[ia] = ig;
+                    self.parents[ig] = ia;
+                    self.aabbs[ia] = self.aabbs[ib].combine(self.aabbs[ig]);
+                    self.aabbs[ic] = self.aabbs[ia].combine(self.aabbs[@"if"]);
 
-                    a.height = 1 + std.math.max(b.height, g.height);
-                    c.height = 1 + std.math.max(a.height, f.height);
+                    self.heights[ia] = 1 + std.math.max(self.heights[ib], self.heights[ig]);
+                    self.heights[ic] = 1 + std.math.max(self.heights[ia], self.heights[@"if"]);
                 } else {
-                    c.child2 = ig;
-                    a.child2 = @"if";
-                    f.parent = ia;
-                    a.aabb = Aabb.combine(b.aabb, f.aabb);
-                    c.aabb = Aabb.combine(a.aabb, g.aabb);
+                    self.child2s[ic] = ig;
+                    self.child2s[ia] = @"if";
+                    self.parents[@"if"] = ia;
+                    self.aabbs[ia] = self.aabbs[ib].combine(self.aabbs[@"if"]);
+                    self.aabbs[ic] = self.aabbs[ia].combine(self.aabbs[ig]);
 
-                    a.height = 1 + std.math.max(b.height, f.height);
-                    c.height = 1 + std.math.max(a.height, g.height);
+                    self.heights[ia] = 1 + std.math.max(self.heights[ib], self.heights[@"if"]);
+                    self.heights[ic] = 1 + std.math.max(self.heights[ia], self.heights[ig]);
                 }
 
                 return ic;
@@ -285,51 +314,50 @@ pub fn DynamicTree(comptime T: type) type {
 
             // Rotate B up
             if (balance_height < -1) {
-                const id = b.child1.?;
-                const ie = b.child2.?;
-                var d = &m_nodes[id];
-                var e = &m_nodes[ie];
+                const id = self.child1s[ib];
+                const ie = self.child2s[ib];
+                // var d = &self.nodes[id];
+                // var e = &self.nodes[ie];
                 // TODO: b2Assert(0 <= iD && iD < m_nodeCapacity);
                 //b2Assert(0 <= iE && iE < m_nodeCapacity);
 
                 // Swap A and B
-                b.child1 = ia;
-                b.parent = a.parent;
-                a.parent = ib;
+                self.child1s[ib] = ia;
+                self.parents[ib] = self.parents[ia];
+                self.parents[ia] = ib;
 
                 // A's old parent should point to B
-                if (b.parent != null) {
-                    const b_parent = b.parent.?;
-                    if (m_nodes[b_parent].child1 == ia) {
-                        m_nodes[b_parent].child1 = ib;
+                if (self.parents[ib] != node_null) {
+                    const b_parent = self.parents[ib];
+                    if (self.child1s[b_parent] == ia) {
+                        self.child1s[b_parent] = ib;
                     } else {
-                        // TODO: b2Assert(m_nodes[B.parent].child2 == iA);
-                        assert(m_nodes[b.parent.?].child2.? == ia);
-                        m_nodes[b_parent].child2 = ib;
+                        assert(self.child2s[b_parent] == ia);
+                        self.child2s[b_parent] = ib;
                     }
                 } else {
-                    self.m_root = ib;
+                    self.root = ib;
                 }
 
                 // Rotate
-                if (d.height > e.height) {
-                    b.child2 = id;
-                    a.child1 = ie;
-                    e.parent = ia;
-                    a.aabb = Aabb.combine(c.aabb, e.aabb);
-                    b.aabb = Aabb.combine(a.aabb, d.aabb);
+                if (self.heights[id] > self.heights[ie]) {
+                    self.child2s[ib] = id;
+                    self.child1s[ia] = ie;
+                    self.parents[ie] = ia;
+                    self.aabbs[ia] = self.aabbs[ic].combine(self.aabbs[ie]);
+                    self.aabbs[ib] = self.aabbs[ia].combine(self.aabbs[id]);
 
-                    a.height = 1 + std.math.max(c.height, e.height);
-                    b.height = 1 + std.math.max(a.height, d.height);
+                    self.heights[ia] = 1 + std.math.max(self.heights[ic], self.heights[ie]);
+                    self.heights[ib] = 1 + std.math.max(self.heights[ia], self.heights[id]);
                 } else {
-                    b.child2 = ie;
-                    a.child1 = id;
-                    d.parent = ia;
-                    a.aabb = Aabb.combine(c.aabb, d.aabb);
-                    b.aabb = Aabb.combine(a.aabb, e.aabb);
+                    self.child2s[ib] = ie;
+                    self.child1s[ia] = id;
+                    self.parents[id] = ia;
+                    self.aabbs[ia] = self.aabbs[ic].combine(self.aabbs[id]);
+                    self.aabbs[ib] = self.aabbs[ia].combine(self.aabbs[ie]);
 
-                    a.height = 1 + std.math.max(c.height, d.height);
-                    b.height = 1 + std.math.max(a.height, e.height);
+                    self.heights[ia] = 1 + std.math.max(self.heights[ic], self.heights[id]);
+                    self.heights[ib] = 1 + std.math.max(self.heights[ia], self.heights[ie]);
                 }
 
                 return ib;
@@ -338,56 +366,41 @@ pub fn DynamicTree(comptime T: type) type {
             return ia;
         }
         fn removeLeaf(self: *Self, leaf: u32) void {
-            // TODO: assert self.m_root != null
-            assert(self.m_root != null);
-            if (leaf == self.m_root.?) {
-                self.m_root = null;
+            assert(self.root != node_null);
+            if (leaf == self.root) {
+                self.root = node_null;
                 return;
             }
-            var m_nodes = self.m_nodes.items;
-            const parent = m_nodes[leaf].parent.?;
-            var grand_parent = m_nodes[parent].parent;
-            var sibling: u32 = undefined;
-            if (m_nodes[parent].child1.? == leaf) {
-                sibling = m_nodes[parent].child2.?;
-            } else {
-                sibling = m_nodes[parent].child1.?;
-            }
+            const parent = self.parents[leaf];
+            var grand_parent = self.parents[parent];
+            const sibling = if (self.child1s[parent] == leaf) self.child2s[parent] else self.child1s[parent];
 
-            if (grand_parent != null) {
+            if (grand_parent != node_null) {
                 // Destroy parent and connect sibling to grandParent.
-                if (m_nodes[grand_parent.?].child1 == parent) {
-                    m_nodes[grand_parent.?].child1 = sibling;
+                if (self.child1s[grand_parent] == parent) {
+                    self.child1s[grand_parent] = sibling;
                 } else {
-                    m_nodes[grand_parent.?].child2 = sibling;
+                    self.child2s[grand_parent] = sibling;
                 }
-                m_nodes[sibling].parent = grand_parent.?;
+                self.parents[sibling] = grand_parent;
                 self.freeNode(parent);
 
                 // Adjust ancestor bounds.
-                var index: ?u32 = grand_parent;
-                while (index != null) : (index = m_nodes[index.?].parent) {
-                    index = self.balance(index.?);
+                var index = grand_parent;
+                while (index != node_null) : (index = self.parents[index]) {
+                    index = self.balance(index);
 
-                    const child1 = m_nodes[index.?].child1.?;
-                    const child2 = m_nodes[index.?].child2.?;
+                    const child1 = self.child1s[index];
+                    const child2 = self.child2s[index];
 
-                    m_nodes[index.?].aabb = Aabb.combine(
-                        m_nodes[child1].aabb,
-                        m_nodes[child2].aabb,
-                    );
-                    m_nodes[index.?].height = 1 + std.math.max(
-                        m_nodes[child1].height,
-                        m_nodes[child2].height,
-                    );
+                    self.aabbs[index] = self.aabbs[child1].combine(self.aabbs[child2]);
+                    self.heights[index] = 1 + std.math.max(self.heights[child1], self.heights[child2]);
                 }
             } else {
-                self.m_root = sibling;
-                m_nodes[sibling].parent = null;
+                self.root = sibling;
+                self.parents[sibling] = node_null;
                 self.freeNode(parent);
             }
-
-            //Validate();
         }
     };
 }
@@ -398,41 +411,45 @@ fn queryCallback(node_id: u32) bool {
 }
 
 test "Dynamic Tree add/remove Node" {
-//     const DyT = DynamicTree(i32);
-//     var dt = DyT.init(std.testing.allocator);
-//     defer dt.deinit();
-//     const Aabb = DyT.Aabb;
-//     const Vec2 = Aabb.Vec2;
-//     const aabb = Aabb.new(
-//         Vec2.new(1, 1),
-//         Vec2.new(3, 3),
-//     );
-//     const aabb1 = Aabb.new(
-//         Vec2.new(2, 2),
-//         Vec2.new(4, 4),
-//     );
+    std.debug.print("\n", .{});
+    const DyT = DynamicTree(i32);
+    var dt = DyT.init(std.testing.allocator);
+    defer dt.deinit();
+    const Aabb = DyT.Aabb;
+    const Vec2 = Aabb.Vec2;
+    const aabb = Aabb.new(
+        Vec2.new(1, 1),
+        Vec2.new(3, 3),
+    );
+    const aabb1 = Aabb.new(
+        Vec2.new(2, 2),
+        Vec2.new(4, 4),
+    );
 
-//     std.debug.print("==== query 1 ====\n", .{});
-//     dt.query(aabb1, queryCallback);
+    std.debug.print("==== query 1 ====\n", .{});
+    dt.query(aabb1, queryCallback);
 
-//     var id = dt.addNode(aabb);
+    var id = dt.addNode(aabb);
+    dt.print("add 1 node");
 
-//     std.debug.print("==== query 2 ====\n", .{});
-//     dt.query(aabb1, queryCallback);
+    std.debug.print("==== query 2 ====\n", .{});
+    dt.query(aabb1, queryCallback);
 
-//     id = dt.addNode(aabb);
-//     dt.removeNode(id);
+    var id2 = dt.addNode(aabb);
+    dt.print("add another node");
+    dt.removeNode(id);
+    dt.print("remove 1 node");
 
-//     std.debug.print("==== query 3 ====\n", .{});
-//     dt.query(aabb1, queryCallback);
+    std.debug.print("==== query 3 ====\n", .{});
+    dt.query(aabb1, queryCallback);
 
-//     id = dt.addNode(aabb);
+    dt.removeNode(id2);
+    dt.print("remove 1 node");
 
-//     std.debug.print("==== query 4 ====\n", .{});
-//     dt.query(aabb1, queryCallback);
-
-//     dt.removeNode(id);
-
-//     std.debug.print("==== query 5 ====\n", .{});
-//     dt.query(aabb1, queryCallback);
+    std.debug.print("==== query 5 ====\n", .{});
+    dt.query(aabb1, queryCallback);
+    id = dt.addNode(aabb);
+    id = dt.addNode(aabb);
+    id = dt.addNode(aabb);
+    dt.print("add 3 node");
 }
