@@ -14,8 +14,8 @@ pub fn build(b: *std.build.Builder) void {
     const exe = b.addExecutable("zig-aabb", "src/main.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
-
     pkgs.addAllTo(exe);
+
     exe.install();
 
     const run_cmd = exe.run();
@@ -24,12 +24,13 @@ pub fn build(b: *std.build.Builder) void {
         run_cmd.addArgs(args);
     }
 
-    const tests = b.addTest("src/main.zig");
-    pkgs.addAllTo(tests);
-    tests.setBuildMode(mode);
-
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
+
+    const tests = b.addTest("src/main.zig");
+    tests.setTarget(target);
+    tests.setBuildMode(mode);
+    pkgs.addAllTo(tests);
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&tests.step);

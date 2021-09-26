@@ -1,2 +1,6 @@
 const std = @import("std");
-pub fn main() !void {}
+test {
+    _ = @import("rect.zig");
+    _ = @import("dynamic_tree.zig");
+    _ = @import("grid.zig");
+}
