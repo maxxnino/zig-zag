@@ -4,7 +4,7 @@ const assert = std.debug.assert;
 const testing = std.testing;
 const RectInt = @import("rect.zig").RectInt;
 const Generator = @import("generator.zig").Generator;
-
+const log = std.log.scoped(.grid);
 pub const Index = u32;
 const IndexLinkList = struct {
     const Node = struct {
@@ -172,7 +172,7 @@ pub fn Grid(comptime T: type, comptime node_size: u32) type {
         }
 
         fn insertToCell(self: *Self, cell: Index, entity: Index) void {
-            std.debug.print("Insert: e: {}, cell: {}\n", .{ entity, cell });
+            log.debug("Insert: e: {}, cell: {}\n", .{ entity, cell });
             var nodes = self.nodes.items(.node);
             const free_node = self.free_list.popFirst(nodes);
             if (free_node) |index| {
@@ -192,7 +192,7 @@ pub fn Grid(comptime T: type, comptime node_size: u32) type {
         }
 
         fn removeFromCell(self: *Self, cell: Index, entity: Index) void {
-            std.debug.print("Remove: e: {}, cell: {}\n", .{ entity, cell });
+            log.debug("Remove: e: {}, cell: {}\n", .{ entity, cell });
             var lists = self.lists.items;
             var slice = self.nodes.slice();
             var entities = slice.items(.entity);

@@ -1,6 +1,6 @@
 const std = @import("std");
 const Rect = @import("rect.zig").Rect;
-
+const log = std.log.scoped(.dynamic_tree);
 const assert = std.debug.assert;
 
 pub fn DynamicTree(comptime T: type) type {
@@ -60,17 +60,17 @@ pub fn DynamicTree(comptime T: type) type {
         }
 
         pub fn print(self: Self, extra: []const u8) void {
-            std.debug.print("==== {s} ====\n", .{extra});
-            std.debug.print("height: {any}\n", .{self.heights});
-            std.debug.print("child1: {any}\n", .{self.child1s});
-            std.debug.print("child2: {any}\n", .{self.child2s});
-            std.debug.print("parent: {any}\n", .{self.parents});
+            log.debug("==== {s} ====\n", .{extra});
+            log.debug("height: {any}\n", .{self.heights});
+            log.debug("child1: {any}\n", .{self.child1s});
+            log.debug("child2: {any}\n", .{self.child2s});
+            log.debug("parent: {any}\n", .{self.parents});
             var next = self.free_list;
-            std.debug.print("free_list: ", .{});
+            log.debug("free_list: ", .{});
             while (next != node_null) : (next = self.child1s[next]) {
-                std.debug.print("{},", .{next});
+                log.debug("{},", .{next});
             }
-            std.debug.print("\n", .{});
+            log.debug("\n", .{});
         }
 
         pub fn addNode(self: *Self, aabb: Aabb) u32 {
