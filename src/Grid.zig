@@ -3,6 +3,7 @@ const za = @import("zalgebra");
 const assert = std.debug.assert;
 const testing = std.testing;
 const RectInt = @import("rect.zig").RectInt;
+const Generator = @import("generator.zig").Generator;
 
 pub const Index = u32;
 const IndexLinkList = struct {
@@ -67,59 +68,16 @@ const IndexLinkList = struct {
 /// node_size: 
 pub fn Grid(comptime T: type, comptime node_size: u32) type {
     return struct {
-        const Self = @This();
         pub const Vec2 = za.Vector2(T);
+        const Self = @This();
         const NodeList = std.MultiArrayList(struct {
             node: IndexLinkList.Node,
             entity: Index,
         });
-        const Iterator = struct {
-            frame: @Frame(query),
-            current_entity: ?Index,
-            grid: Self,
-
-            pub fn next(it: *Iterator) ?Index {
-                if (it.current_entity) |value| {
-                    resume it.frame;
-                    return value;
-                }
-                return null;
-            }
-            pub fn refresh(it: *Iterator, aabb: RectInt) void {
-                const btm_left = aabb.lower_bound.sub(Vec2.new(max_entity_size, max_entity_size));
-                const top_right = aabb.upper_bound.add(Vec2.new(max_entity_size, max_entity_size));
-                it.frame = async it.query(btm_left, top_right);
-            }
-
-            fn query(it: *Iterator, btm_left: Vec2, top_right: Vec2) void {
-                const begin_x = it.grid.posToGridX(btm_left);
-                const end_x = it.grid.posToGridX(top_right);
-                const end_y = it.grid.posToGridY(top_right);
-                var current_y = it.grid.posToGridY(btm_left);
-                var current_x = begin_x;
-                var slice = it.grid.nodes.slice();
-                var nodes = slice.items(.node);
-                var entities = slice.items(.entity);
-                var lists = it.grid.lists.items;
-                while (current_y <= end_y) : (current_y += 1) {
-                    while (current_x <= end_x) : (current_x += 1) {
-                        const cell = it.grid.cellIndex(current_x, current_y);
-                        const first = lists[cell].getFirst();
-                        if (first) |value| {
-                            var current_node = value;
-                            it.current_entity = entities[current_node];
-                            suspend {}
-                            while (nodes[current_node].getNext()) |entry| {
-                                current_node = entry;
-                                it.current_entity = entities[current_node];
-                                suspend {}
-                            }
-                        }
-                    }
-                    current_x = begin_x;
-                }
-                it.current_entity = null;
-            }
+        const QueryIterator = Generator(QueryCtx, Index, query);
+        const QueryCtx = struct {
+            grid: *Self,
+            aabb: RectInt,
         };
 
         const max_entity_size = node_size / 4;
@@ -173,12 +131,44 @@ pub fn Grid(comptime T: type, comptime node_size: u32) type {
             }
         }
 
-        pub fn queryIterator(grid: Self) Iterator {
-            return .{
-                .frame = undefined,
-                .current_entity = null,
-                .grid = grid,
-            };
+        pub fn queryIterator(self: *Self, aabb: RectInt) QueryIterator {
+            return QueryIterator.init(.{
+                .grid = self,
+                .aabb = RectInt.new(
+                    aabb.lower_bound.sub(Vec2.new(max_entity_size, max_entity_size)),
+                    aabb.upper_bound.add(Vec2.new(max_entity_size, max_entity_size)),
+                ),
+            });
+        }
+
+        fn query(ctx: QueryCtx, entity: *?Index) void {
+            const begin_x = ctx.grid.posToGridX(ctx.aabb.lower_bound);
+            const end_x = ctx.grid.posToGridX(ctx.aabb.upper_bound);
+            const end_y = ctx.grid.posToGridY(ctx.aabb.upper_bound);
+            var current_y = ctx.grid.posToGridY(ctx.aabb.lower_bound);
+            var current_x = begin_x;
+            var slice = ctx.grid.nodes.slice();
+            var nodes = slice.items(.node);
+            var entities = slice.items(.entity);
+            var lists = ctx.grid.lists.items;
+            while (current_y <= end_y) : (current_y += 1) {
+                while (current_x <= end_x) : (current_x += 1) {
+                    const cell = ctx.grid.cellIndex(current_x, current_y);
+                    const first = lists[cell].getFirst();
+                    if (first) |value| {
+                        var current_node = value;
+                        entity.* = entities[current_node];
+                        suspend {}
+                        while (nodes[current_node].getNext()) |entry| {
+                            current_node = entry;
+                            entity.* = entities[current_node];
+                            suspend {}
+                        }
+                    }
+                }
+                current_x = begin_x;
+            }
+            entity.* = null;
         }
 
         fn insertToCell(self: *Self, cell: Index, entity: Index) void {
@@ -286,72 +276,71 @@ test "cell index" {
 }
 
 test "add/remove" {
-        std.debug.print("\n", .{});
-        const GridInt = Grid(i32, 1);
-        const Vec2 = GridInt.Vec2;
-        const Entity = std.MultiArrayList(struct {
-            entity: Index,
-            pos: Vec2,
-        });
-        const allocator = std.testing.allocator;
-        var grid = GridInt.init(
-            allocator,
-            20,
-            20,
-            GridInt.Vec2.new(0, 0),
-        );
-        defer grid.deinit();
-        var manager = Entity{};
-        defer manager.deinit(allocator);
-        try manager.append(allocator, .{ .entity = 0, .pos = Vec2.new(0, 0) });
-        try manager.append(allocator, .{ .entity = 1, .pos = Vec2.new(1, 0) });
-        try manager.append(allocator, .{ .entity = 2, .pos = Vec2.new(0, 1) });
-        try manager.append(allocator, .{ .entity = 3, .pos = Vec2.new(4, 4) });
-        try manager.append(allocator, .{ .entity = 4, .pos = Vec2.new(5, 5) });
-        try manager.append(allocator, .{ .entity = 5, .pos = Vec2.new(5, 0) });
+    std.debug.print("\n", .{});
+    const GridInt = Grid(i32, 1);
+    const Vec2 = GridInt.Vec2;
+    const Entity = std.MultiArrayList(struct {
+        entity: Index,
+        pos: Vec2,
+    });
+    const allocator = std.testing.allocator;
+    var grid = GridInt.init(
+        allocator,
+        20,
+        20,
+        GridInt.Vec2.new(0, 0),
+    );
+    defer grid.deinit();
+    var manager = Entity{};
+    defer manager.deinit(allocator);
+    try manager.append(allocator, .{ .entity = 0, .pos = Vec2.new(0, 0) });
+    try manager.append(allocator, .{ .entity = 1, .pos = Vec2.new(1, 0) });
+    try manager.append(allocator, .{ .entity = 2, .pos = Vec2.new(0, 1) });
+    try manager.append(allocator, .{ .entity = 3, .pos = Vec2.new(4, 4) });
+    try manager.append(allocator, .{ .entity = 4, .pos = Vec2.new(5, 5) });
+    try manager.append(allocator, .{ .entity = 5, .pos = Vec2.new(5, 0) });
 
-        var slice = manager.slice();
-        var entities = slice.items(.entity);
-        var position = slice.items(.pos);
-        var index: u32 = 0;
-        while (index < slice.len) : (index += 1) {
-            grid.insert(entities[index], position[index]) catch unreachable;
-        }
-        var it = grid.queryIterator();
-
-        std.debug.print("query at {{{},{}}}-{{{},{}}}\n", .{ 0, 0, 5, 5 });
-        it.refresh(RectInt.new(Vec2.new(0, 0), Vec2.new(5, 5)));
-        while (it.next()) |value| {
-            std.debug.print("query: {}\n", .{value});
-        }
-        index = 0;
-        grid.move(entities[index], position[index], Vec2.new(2, 2));
-
-        std.debug.print("query at {{{},{}}}-{{{},{}}}\n", .{ 0, 0, 3, 3 });
-        it.refresh(RectInt.new(Vec2.new(0, 0), Vec2.new(3, 3)));
-        while (it.next()) |value| {
-            std.debug.print("query: {}\n", .{value});
-        }
-        index = 2;
-        grid.remove(entities[index], position[index]);
-        index = 4;
-        grid.remove(entities[index], position[index]);
-
-        it.refresh(RectInt.new(Vec2.new(0, 0), Vec2.new(5, 5)));
-
-        std.debug.print("query at {{{},{}}}-{{{},{}}}\n", .{ 0, 0, 5, 5 });
-        while (it.next()) |value| {
-            std.debug.print("query: {}\n", .{value});
-        }
-        index = 2;
+    var slice = manager.slice();
+    var entities = slice.items(.entity);
+    var position = slice.items(.pos);
+    var index: u32 = 0;
+    while (index < slice.len) : (index += 1) {
         grid.insert(entities[index], position[index]) catch unreachable;
-        index = 4;
-        grid.insert(entities[index], position[index]) catch unreachable;
+    }
+    var it = grid.queryIterator(RectInt.new(Vec2.new(0, 0), Vec2.new(5, 5)));
 
-        it.refresh(RectInt.new(Vec2.new(0, 0), Vec2.new(5, 5)));
+    std.debug.print("query at {{{},{}}}-{{{},{}}}\n", .{ 0, 0, 5, 5 });
+    while (it.next()) |value| {
+        std.debug.print("query: {}\n", .{value});
+    }
+    index = 0;
+    grid.move(entities[index], position[index], Vec2.new(2, 2));
 
-        std.debug.print("query at {{{},{}}}-{{{},{}}}\n", .{ 0, 0, 5, 5 });
-        while (it.next()) |value| {
-            std.debug.print("query: {}\n", .{value});
-        }
+    std.debug.print("query at {{{},{}}}-{{{},{}}}\n", .{ 0, 0, 3, 3 });
+    it = grid.queryIterator(RectInt.new(Vec2.new(0, 0), Vec2.new(3, 3)));
+    while (it.next()) |value| {
+        std.debug.print("query: {}\n", .{value});
+    }
+    index = 2;
+    grid.remove(entities[index], position[index]);
+    index = 4;
+    grid.remove(entities[index], position[index]);
+
+    it = grid.queryIterator(RectInt.new(Vec2.new(0, 0), Vec2.new(5, 5)));
+
+    std.debug.print("query at {{{},{}}}-{{{},{}}}\n", .{ 0, 0, 5, 5 });
+    while (it.next()) |value| {
+        std.debug.print("query: {}\n", .{value});
+    }
+    index = 2;
+    grid.insert(entities[index], position[index]) catch unreachable;
+    index = 4;
+    grid.insert(entities[index], position[index]) catch unreachable;
+
+    it = grid.queryIterator(RectInt.new(Vec2.new(0, 0), Vec2.new(5, 5)));
+
+    std.debug.print("query at {{{},{}}}-{{{},{}}}\n", .{ 0, 0, 5, 5 });
+    while (it.next()) |value| {
+        std.debug.print("query: {}\n", .{value});
+    }
 }
