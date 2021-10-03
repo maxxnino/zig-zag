@@ -3,7 +3,6 @@ const za = @import("zalgebra");
 const assert = std.debug.assert;
 const testing = std.testing;
 const RectInt = @import("rect.zig").RectInt;
-const Generator = @import("generator.zig").Generator;
 const log = std.log.scoped(.grid);
 pub const Index = u32;
 const node_null = std.math.maxInt(Index);
