@@ -21,6 +21,13 @@ pub fn Rect(comptime T: type) type {
             };
         }
 
+        pub fn newFromPos(m_pos: Vec2, h_size: Vec2) Self {
+            return .{
+                .lower_bound = m_pos.sub(h_size),
+                .upper_bound = m_pos.add(h_size),
+            };
+        }
+
         pub fn testOverlap(a: Self, b: Self) bool {
             const d1 = Vec2.sub(b.lower_bound, a.upper_bound);
             const d2 = Vec2.sub(a.lower_bound, b.upper_bound);

@@ -11,6 +11,7 @@ pub fn build(b: *std.build.Builder) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
+    //run
     const exe = b.addExecutable("zig-aabb", "src/main.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
@@ -24,6 +25,7 @@ pub fn build(b: *std.build.Builder) void {
         run_cmd.addArgs(args);
     }
 
+    //test
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
