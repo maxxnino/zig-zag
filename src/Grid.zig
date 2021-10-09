@@ -20,7 +20,7 @@ inv_cells_size: f32,
 // Stores the half-size of all elements stored in the grid.
 h_size: Vec2,
 
-// Stores the upper-left corner of the grid.
+// Stores the lower-left corner of the grid.
 pos: Vec2,
 
 // Stores the size of the grid.
@@ -79,25 +79,28 @@ const IndexLinkList = struct {
     }
 };
 
-pub fn init(
-    allocator: *std.mem.Allocator,
+pub const InitInfo = struct {
     half_element_size: f32,
-    position: Vec2,
-    cell_size: u32,
+    cell_size: f32,
     num_cols: u32,
     num_rows: u32,
+};
+pub fn init(
+    allocator: *std.mem.Allocator,
+    position: Vec2,
+    info: InitInfo,
 ) Self {
     return .{
-        .inv_cells_size = 1.0 / @intToFloat(f32, cell_size),
-        .num_cols = num_cols,
-        .num_rows = num_rows,
-        .num_cells = num_cols * num_rows,
+        .inv_cells_size = 1.0 / info.cell_size,
+        .num_cols = info.num_cols,
+        .num_rows = info.num_rows,
+        .num_cells = info.num_cols * info.num_rows,
         .pos = position,
-        .width = num_rows * cell_size,
-        .height = num_cols * cell_size,
-        .h_size = Vec2.new(half_element_size, half_element_size),
-        .lists = std.ArrayList(IndexLinkList).init(allocator),
-        .nodes = std.ArrayList(GridElt).init(allocator),
+        .width = info.num_rows * info.cell_size,
+        .height = info.num_cols * info.cell_size,
+        .h_size = Vec2.new(info.half_element_size, info.half_element_size),
+        .lists = std.ArrayList(IndexLinkList).init(info.allocator),
+        .nodes = std.ArrayList(GridElt).init(info.allocator),
         .free_list = IndexLinkList{},
     };
 }
@@ -122,8 +125,8 @@ fn ensureInitLists(self: *Self) void {
     self.lists.appendNTimes(.{}, self.num_rows * self.num_cols) catch unreachable;
 }
 
-pub fn remove(self: *Self, entity: Index, pos: Vec2) void {
-    const cell = self.posToCell(pos);
+pub fn remove(self: *Self, entity: Index, m_pos: Vec2) void {
+    const cell = self.posToCell(m_pos);
     self.removeFromCell(cell, entity);
 }
 
@@ -156,21 +159,14 @@ fn insertToCell(self: *Self, cell: Index, elt: GridElt) void {
 fn removeFromCell(self: *Self, cell: Index, entity: Index) void {
     var lists = self.lists.items;
     var nodes = self.nodes.items;
-    var index = lists[cell].getFirst();
+    var index = lists[cell].popFirst(nodes);
     var prev_idx: ?Index = null;
     assert(index != null);
-    if (index) |value| {
-        if (nodes[value].entity == entity) {
-            const removed_index = lists[cell].popFirst(nodes).?;
-            return self.free_list.prepend(nodes, removed_index);
-        }
-        prev_idx = value;
-        index = nodes[value].getNext();
-    }
-
     while (index) |value| {
         if (nodes[value].entity == entity) {
-            const removed_index = nodes[prev_idx.?].removeNext(nodes).?;
+            const removed_index = if (prev_idx) |entry| {
+                nodes[entry].removeNext(nodes).?;
+            } else value;
             return self.free_list.prepend(nodes, removed_index);
         }
         prev_idx = value;
@@ -195,22 +191,14 @@ pub fn query(self: *Self, m_pos: Vec2, h_size: Vec2, callback: anytype) void {
     while (current_y <= end_y) : (current_y += 1) {
         while (current_x <= end_x) : (current_x += 1) {
             const cell = self.cellIndex(current_x, current_y);
-            const first = lists[cell].getFirst();
-            if (first) |value| {
-                var current_value = value;
-                if (std.math.fabs(m_pos.x - nodes[current_value].m_pos.x) <= f_size.x and
-                    std.math.fabs(m_pos.y - nodes[current_value].m_pos.y) <= f_size.y)
+            var current_idx = lists[cell].getFirst();
+            while (current_idx) |value| {
+                if (std.math.fabs(m_pos.x - nodes[value].m_pos.x) <= f_size.x and
+                    std.math.fabs(m_pos.y - nodes[value].m_pos.y) <= f_size.y)
                 {
-                    callback.onOverlap(nodes[current_value].entity);
+                    callback.onOverlap(nodes[value].entity);
                 }
-                while (nodes[current_value].getNext()) |next| {
-                    current_value = next;
-                    if (std.math.fabs(m_pos.x - nodes[current_value].m_pos.x) <= f_size.x and
-                        std.math.fabs(m_pos.y - nodes[current_value].m_pos.y) <= f_size.y)
-                    {
-                        callback.onOverlap(nodes[current_value].entity);
-                    }
-                }
+                current_idx = nodes[value].getNext();
             }
         }
         current_x = begin_x;
