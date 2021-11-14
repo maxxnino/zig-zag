@@ -5,8 +5,9 @@ const assert = std.debug.assert;
 
 const Self = @This();
 pub const Vec2 = Rect.Vec2;
+const Node = struct { child1: u32, child2: u32, parent: u32, height: i16, aabb: Rect };
 
-const NodeList = std.MultiArrayList(struct { child1: u32, child2: u32, parent: u32, height: i16, aabb: Rect });
+const NodeList = std.MultiArrayList(Node);
 const node_null = std.math.maxInt(u32);
 
 root: u32,
@@ -215,18 +216,15 @@ fn insertLeaf(self: *Self, leaf: u32) void {
             self.child2s[old_parent] = new_parent;
         }
 
-        self.child1s[new_parent] = sibling;
-        self.child2s[new_parent] = leaf;
-        self.parents[sibling] = new_parent;
         self.parents[leaf] = new_parent;
     } else {
         // The sibling was the root.
-        self.child1s[new_parent] = sibling;
-        self.child2s[new_parent] = leaf;
-        self.parents[sibling] = new_parent;
         self.parents[leaf] = new_parent;
         self.root = new_parent;
     }
+    self.child1s[new_parent] = sibling;
+    self.child2s[new_parent] = leaf;
+    self.parents[sibling] = new_parent;
 
     // Walk back up the tree fixing heights and AABBs
     var i = self.parents[leaf];
@@ -248,7 +246,7 @@ fn insertLeaf(self: *Self, leaf: u32) void {
 fn balance(self: *Self, node_id: u32) u32 {
     assert(node_id != node_null);
     const ia = node_id;
-    if (self.isLeaf(ia) and self.heights[ia] < 2) {
+    if (self.isLeaf(ia) or self.heights[ia] < 2) {
         return ia;
     }
 
@@ -375,6 +373,7 @@ fn removeLeaf(self: *Self, leaf: u32) void {
     var grand_parent = self.parents[parent];
     const sibling = if (self.child1s[parent] == leaf) self.child2s[parent] else self.child1s[parent];
 
+    self.freeNode(parent);
     if (grand_parent != node_null) {
         // Destroy parent and connect sibling to grandParent.
         if (self.child1s[grand_parent] == parent) {
@@ -383,7 +382,6 @@ fn removeLeaf(self: *Self, leaf: u32) void {
             self.child2s[grand_parent] = sibling;
         }
         self.parents[sibling] = grand_parent;
-        self.freeNode(parent);
 
         // Adjust ancestor bounds.
         var index = grand_parent;
@@ -399,20 +397,69 @@ fn removeLeaf(self: *Self, leaf: u32) void {
     } else {
         self.root = sibling;
         self.parents[sibling] = node_null;
-        self.freeNode(parent);
     }
 }
 
-fn floatFromRange(prng: *std.rand.Random, min: i32, max: i32) f32 {
+fn floatFromRange(prng: std.rand.Random, min: i32, max: i32) f32 {
     return @intToFloat(f32, prng.intRangeAtMost(i32, min, max));
 }
+test "behavior" {
+    std.debug.print("\n", .{});
+    var dt = Self.init(std.testing.allocator);
+    defer dt.deinit();
+    var rects = std.ArrayList(Rect).init(std.testing.allocator);
+    defer rects.deinit();
 
-test "Dynamic Tree add/remove Node" {
+    try rects.append(Rect.newFromPos(
+        Vec2.new(-1, 1),
+        Vec2.new(5, 2),
+    ));
+    try rects.append(Rect.newFromPos(
+        Vec2.new(-2, -7),
+        Vec2.new(9, 1),
+    ));
+    try rects.append(Rect.newFromPos(
+        Vec2.new(-6, -5),
+        Vec2.new(-1, 2),
+    ));
+    try rects.append(Rect.newFromPos(
+        Vec2.new(-1, -2),
+        Vec2.new(3, 0),
+    ));
+    try rects.append(Rect.newFromPos(
+        Vec2.new(-3, -3),
+        Vec2.new(2, -1),
+    ));
+    for(rects.items) |entry|{
+        _ = dt.addNode(entry);
+    }
+
+    {
+        const QueryCallback = struct {
+            const fixed_cap = 1048;
+            buffer: [fixed_cap]u8 = undefined,
+            pub fn onOverlap(self: *@This(), entity: u32) void {
+                _ = self;
+                std.debug.print("overlap with {}\n", .{entity});
+            }
+        };
+        var callback = QueryCallback{};
+        var allocator = std.heap.FixedBufferAllocator.init(callback.buffer[0..callback.buffer.len]);
+        for (rects.items) |aabb| {
+            try dt.query(aabb, &allocator.allocator, &callback);
+        }
+    }
+}
+test "Performance\n" {
+    const builtin = @import("builtin");
+    if(builtin.mode == .Debug){
+        return error.SkipZigTest;
+    }
     log.debug("\n", .{});
     var dt = Self.init(std.testing.allocator);
     defer dt.deinit();
     const total = 50_000;
-    var prng = std.rand.Xoshiro256.init(0);
+    var random = std.rand.Xoshiro256.init(0).random();
     const max_size = 20;
     const min_size = 1;
     const max = 50_000;
@@ -427,12 +474,12 @@ test "Dynamic Tree add/remove Node" {
         while (entity < total) : (entity += 1) {
             const aabb = Rect.newFromPos(
                 Vec2.new(
-                    floatFromRange(&prng.random, min, max),
-                    floatFromRange(&prng.random, min, max),
+                    floatFromRange(random, min, max),
+                    floatFromRange(random, min, max),
                 ),
                 Vec2.new(
-                    floatFromRange(&prng.random, min_size, max_size),
-                    floatFromRange(&prng.random, min_size, max_size),
+                    floatFromRange(random, min_size, max_size),
+                    floatFromRange(random, min_size, max_size),
                 ),
             );
             _ = dt.addNode(aabb);
@@ -441,7 +488,6 @@ test "Dynamic Tree add/remove Node" {
         const time_0 = timer.read();
         std.debug.print("add {} entity take {}ms\n", .{ total, time_0 / std.time.ns_per_ms });
     }
-
 
     {
         const QueryCallback = struct {

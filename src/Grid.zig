@@ -80,27 +80,26 @@ const IndexLinkList = struct {
 };
 
 pub const InitInfo = struct {
-    half_element_size: f32,
-    cell_size: f32,
-    num_cols: u32,
-    num_rows: u32,
 };
 pub fn init(
     allocator: *std.mem.Allocator,
     position: Vec2,
-    info: InitInfo,
+    half_element_size: f32,
+    cell_size: f32,
+    num_cols: u32,
+    num_rows: u32,
 ) Self {
     return .{
-        .inv_cells_size = 1.0 / info.cell_size,
-        .num_cols = info.num_cols,
-        .num_rows = info.num_rows,
-        .num_cells = info.num_cols * info.num_rows,
+        .inv_cells_size = 1.0 / cell_size,
+        .num_cols = num_cols,
+        .num_rows = num_rows,
+        .num_cells = num_cols * num_rows,
         .pos = position,
-        .width = info.num_rows * info.cell_size,
-        .height = info.num_cols * info.cell_size,
-        .h_size = Vec2.new(info.half_element_size, info.half_element_size),
-        .lists = std.ArrayList(IndexLinkList).init(info.allocator),
-        .nodes = std.ArrayList(GridElt).init(info.allocator),
+        .width = num_rows * @floatToInt(u32, cell_size),
+        .height = num_cols * @floatToInt(u32, cell_size),
+        .h_size = Vec2.new(half_element_size, half_element_size),
+        .lists = std.ArrayList(IndexLinkList).init(allocator),
+        .nodes = std.ArrayList(GridElt).init(allocator),
         .free_list = IndexLinkList{},
     };
 }
@@ -233,8 +232,8 @@ test "cell index" {
     const scale = 4;
     var grid = Self.init(
         testing.allocator,
-        @intToFloat(f32, scale) / 4,
         Vec2.new(0, 0),
+        @intToFloat(f32, scale) / 4,
         scale,
         2,
         2,
@@ -249,12 +248,15 @@ test "cell index" {
     try testing.expectEqual(grid.posToCell(Vec2.new(2 * scale, 2 * scale)), 3);
 }
 
-test "add/remove" {
-    std.debug.print("\n", .{});
+test "Performance\n" {
+    const builtin = @import("builtin");
+    if(builtin.mode == .Debug){
+        return error.SkipZigTest;
+    }
     const x = 100;
     const y = 100;
     const size = 4;
-    var prng = std.rand.Xoshiro256.init(0);
+    var random = std.rand.Xoshiro256.init(0).random();
     const Entity = std.MultiArrayList(struct {
         entity: u32,
         pos: Vec2,
@@ -263,8 +265,8 @@ test "add/remove" {
     const allocator = std.testing.allocator;
     var grid = Self.init(
         testing.allocator,
-        @intToFloat(f32, size) / 4,
         Vec2.new(0, 0),
+        @intToFloat(f32, size) / 4,
         size,
         x,
         y,
@@ -276,8 +278,8 @@ test "add/remove" {
     {
         var entity: u32 = 0;
         while (entity < x * y) : (entity += 1) {
-            const x_pos = prng.random.float(f32) * @intToFloat(f32, x * y * size * size);
-            const y_pos = prng.random.float(f32) * @intToFloat(f32, x * y * size * size);
+            const x_pos = random.float(f32) * @intToFloat(f32, x * y * size * size);
+            const y_pos = random.float(f32) * @intToFloat(f32, x * y * size * size);
             const pos = Vec2.new(x_pos, y_pos);
             try manager.append(allocator, .{
                 .entity = entity,
