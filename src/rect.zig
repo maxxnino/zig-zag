@@ -21,7 +21,7 @@ pub fn Rect(comptime T: type) type {
             };
         }
 
-        pub fn newFromPos(m_pos: Vec2, h_size: Vec2) Self {
+        pub fn newFromCenter(m_pos: Vec2, h_size: Vec2) Self {
             return .{
                 .lower_bound = m_pos.sub(h_size),
                 .upper_bound = m_pos.add(h_size),
@@ -42,6 +42,15 @@ pub fn Rect(comptime T: type) type {
                 Vec2.min(a.lower_bound, b.lower_bound),
                 Vec2.max(a.upper_bound, b.upper_bound),
             );
+        }
+
+        pub fn contains(a: Self, b: Self) bool {
+            var result = true;
+            result = result and a.lower_bound.x <= b.lower_bound.x;
+            result = result and a.lower_bound.y <= b.lower_bound.y;
+            result = result and b.upper_bound.x <= a.upper_bound.x;
+            result = result and b.upper_bound.y <= a.upper_bound.y;
+            return result;
         }
 
         pub fn getPerimeter(self: Self) T {
