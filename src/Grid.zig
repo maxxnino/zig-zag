@@ -1,14 +1,57 @@
 const std = @import("std");
-const za = @import("zalgebra");
+const basic_type = @import("basic_type.zig");
 const assert = std.debug.assert;
 const testing = std.testing;
-const RectInt = @import("rect.zig").RectInt;
 const log = std.log.scoped(.grid);
-pub const Index = u32;
-const node_null = std.math.maxInt(Index);
-const Self = @This();
-pub const Vec2 = za.Vec2;
 
+const Index = u32;
+const Grid = @This();
+const Vec2 = basic_type.Vec2;
+const node_null = std.math.maxInt(Index);
+const Node = struct {
+    /// Stores the next element in the cell.
+    next: u32,
+    /// Stores the ID of the element. This can be used to associate external
+    /// data to the element.
+    entity: Index,
+    /// Stores the center position of the uniformly-sized element.
+    m_pos: Vec2,
+
+    /// Remove a node from the list.
+    pub fn removeNext(node: Index, next: []Index) ?Index {
+        const next_node = next[node];
+        if (next_node == node_null) return null;
+        next[node] = next[next_node];
+        return next_node;
+    }
+
+    pub fn getNext(node: Index, next: []Index) ?Index {
+        const next_node = next[node];
+        return if (next_node != node_null) next_node else null;
+    }
+};
+
+const IndexLinkList = struct {
+    first: u32 = node_null,
+
+    /// Insert a new node at the head.
+    pub fn prepend(list: *IndexLinkList, node: Index, next: []Index) void {
+        next[node] = list.first;
+        list.first = node;
+    }
+
+    pub fn getFirst(list: IndexLinkList) ?Index {
+        return if (list.first != node_null) list.first else null;
+    }
+
+    pub fn popFirst(list: *IndexLinkList, next: []Index) ?Index {
+        if (list.first == node_null) return null;
+        const first = list.first;
+        list.first = next[first];
+        return first;
+    }
+};
+const NodeList = std.MultiArrayList(Node);
 /// Stores the number of columns, rows, and cells in the grid.
 num_cols: u32,
 num_rows: u32,
@@ -26,61 +69,13 @@ pos: Vec2,
 // Stores the size of the grid.
 width: u32,
 height: u32,
-nodes: std.ArrayList(GridElt),
+nodes: NodeList.Slice,
+node_list: NodeList,
 lists: std.ArrayList(IndexLinkList),
 free_list: IndexLinkList,
+allocator: *std.mem.Allocator,
 
-const GridElt = struct {
-    /// Stores the next element in the cell.
-    next: u32,
-    /// Stores the ID of the element. This can be used to associate external
-    /// data to the element.
-    entity: Index,
-    /// Stores the center position of the uniformly-sized element.
-    m_pos: Vec2,
-
-    /// Remove a node from the list.
-    pub fn removeNext(node: *GridElt, nodes: []GridElt) ?Index {
-        if (node.next == node_null) return null;
-        const next = node.next;
-        node.next = nodes[next].next;
-        return next;
-    }
-
-    pub fn getNext(self: GridElt) ?Index {
-        if (self.next != node_null) {
-            return self.next;
-        }
-        return null;
-    }
-};
-
-const IndexLinkList = struct {
-    first: u32 = node_null,
-
-    /// Insert a new node at the head.
-    pub fn prepend(list: *IndexLinkList, nodes: []GridElt, new_node_index: Index) void {
-        nodes[new_node_index].next = list.first;
-        list.first = new_node_index;
-    }
-
-    pub fn getFirst(list: IndexLinkList) ?Index {
-        if (list.first != node_null) {
-            return list.first;
-        }
-        return null;
-    }
-
-    pub fn popFirst(list: *IndexLinkList, nodes: []GridElt) ?Index {
-        if (list.first == node_null) return null;
-        const first = list.first;
-        list.first = nodes[first].next;
-        return first;
-    }
-};
-
-pub const InitInfo = struct {
-};
+pub const InitInfo = struct {};
 pub fn init(
     allocator: *std.mem.Allocator,
     position: Vec2,
@@ -88,7 +83,8 @@ pub fn init(
     cell_size: f32,
     num_cols: u32,
     num_rows: u32,
-) Self {
+) Grid {
+    var node_list = NodeList{};
     return .{
         .inv_cells_size = 1.0 / cell_size,
         .num_cols = num_cols,
@@ -99,42 +95,44 @@ pub fn init(
         .height = num_cols * @floatToInt(u32, cell_size),
         .h_size = Vec2.new(half_element_size, half_element_size),
         .lists = std.ArrayList(IndexLinkList).init(allocator),
-        .nodes = std.ArrayList(GridElt).init(allocator),
+        .nodes = node_list.slice(),
+        .node_list = node_list,
         .free_list = IndexLinkList{},
+        .allocator = allocator,
     };
 }
 
-pub fn deinit(self: *Self) void {
-    self.nodes.deinit();
+pub fn deinit(self: *Grid) void {
+    self.node_list.deinit(self.allocator);
     self.lists.deinit();
 }
 
-pub fn insert(self: *Self, entity: Index, pos: Vec2) !void {
+pub fn insert(self: *Grid, entity: Index, pos: Vec2) !void {
     self.ensureInitLists();
     const cell = self.posToCell(pos);
-    self.insertToCell(cell, GridElt{
+    self.insertToCell(cell, Node{
         .next = node_null,
         .entity = entity,
         .m_pos = pos,
     });
 }
 
-fn ensureInitLists(self: *Self) void {
-    if (self.nodes.items.len != 0) return;
+fn ensureInitLists(self: *Grid) void {
+    if (self.nodes.len != 0) return;
     self.lists.appendNTimes(.{}, self.num_rows * self.num_cols) catch unreachable;
 }
 
-pub fn remove(self: *Self, entity: Index, m_pos: Vec2) void {
+pub fn remove(self: *Grid, entity: Index, m_pos: Vec2) void {
     const cell = self.posToCell(m_pos);
     self.removeFromCell(cell, entity);
 }
 
-pub fn move(self: *Self, entity: Index, from_pos: Vec2, to_pos: Vec2) void {
+pub fn move(self: *Grid, entity: Index, from_pos: Vec2, to_pos: Vec2) void {
     var from_cell = self.posToCell(from_pos);
     var to_cell = self.posToCell(to_pos);
     if (from_cell != to_cell) {
         self.removeFromCell(from_cell, entity);
-        self.insertToCell(to_cell, GridElt{
+        self.insertToCell(to_cell, Node{
             .next = node_null,
             .entity = entity,
             .pos = to_pos,
@@ -142,95 +140,98 @@ pub fn move(self: *Self, entity: Index, from_pos: Vec2, to_pos: Vec2) void {
     }
 }
 
-fn insertToCell(self: *Self, cell: Index, elt: GridElt) void {
-    var nodes = self.nodes.items;
-    const free_node = self.free_list.popFirst(nodes);
+fn insertToCell(self: *Grid, cell: Index, elt: Node) void {
+    var next = self.nodes.items(.next);
+    const free_node = self.free_list.popFirst(next);
     if (free_node) |index| {
-        nodes[index] = elt;
-        return self.lists.items[cell].prepend(nodes, index);
+        self.node_list.set(index, elt);
+        return self.lists.items[cell].prepend(index, next);
     }
 
-    const index = @intCast(Index, nodes.len);
-    self.nodes.append(elt) catch unreachable;
-    self.lists.items[cell].prepend(self.nodes.items, index);
+    const index = @intCast(Index, self.nodes.len);
+    self.node_list.append(self.allocator, elt) catch unreachable;
+    self.nodes = self.node_list.slice();
+    self.lists.items[cell].prepend(index, self.nodes.items(.next));
 }
 
-fn removeFromCell(self: *Self, cell: Index, entity: Index) void {
+fn removeFromCell(self: *Grid, cell: Index, entity: Index) void {
     var lists = self.lists.items;
-    var nodes = self.nodes.items;
-    var index = lists[cell].popFirst(nodes);
+    var next = self.nodes.items(.next);
+    var entities = self.nodes.items(.entity);
+    var index = lists[cell].popFirst(next);
     var prev_idx: ?Index = null;
     assert(index != null);
     while (index) |value| {
-        if (nodes[value].entity == entity) {
+        if (entities[value] == entity) {
             const removed_index = if (prev_idx) |entry| {
-                nodes[entry].removeNext(nodes).?;
+                Node.removeNext(entry, next).?;
             } else value;
-            return self.free_list.prepend(nodes, removed_index);
+            return self.free_list.prepend(removed_index, next);
         }
         prev_idx = value;
-        index = nodes[value].getNext();
+        index = Node.getNext(value, next);
     }
 
     unreachable;
 }
 
-pub fn query(self: *Self, m_pos: Vec2, h_size: Vec2, callback: anytype) void {
+pub fn query(grid: *Grid, m_pos: Vec2, h_size: Vec2, callback: anytype) void {
     if (!@hasDecl(std.meta.Child(@TypeOf(callback)), "onOverlap")) {
         @compileError("Expect " ++ @typeName(@TypeOf(callback)) ++ " has onCallback function");
     }
-    const f_size = h_size.add(self.h_size);
-    const begin_x = self.posToGridX(m_pos.x - f_size.x);
-    const end_x = self.posToGridX(m_pos.x + f_size.x);
-    const end_y = self.posToGridY(m_pos.y + f_size.y);
-    var current_y = self.posToGridY(m_pos.y - f_size.y);
-    var current_x = begin_x;
-    var nodes: []const GridElt = self.nodes.items;
-    var lists: []const IndexLinkList = self.lists.items;
+    const f_size = h_size.add(grid.h_size);
+    const begin_x = grid.posToGridX(m_pos.x - f_size.x);
+    const end_x = grid.posToGridX(m_pos.x + f_size.x);
+    const end_y = grid.posToGridY(m_pos.y + f_size.y);
+    var current_y = grid.posToGridY(m_pos.y - f_size.y);
+    const lists = grid.lists.items;
+    const next = grid.nodes.items(.next);
+    const entities = grid.nodes.items(.entity);
+    const positions = grid.nodes.items(.m_pos);
     while (current_y <= end_y) : (current_y += 1) {
+        var current_x = begin_x;
         while (current_x <= end_x) : (current_x += 1) {
-            const cell = self.cellIndex(current_x, current_y);
+            const cell = grid.cellIndex(current_x, current_y);
             var current_idx = lists[cell].getFirst();
             while (current_idx) |value| {
-                if (std.math.fabs(m_pos.x - nodes[value].m_pos.x) <= f_size.x and
-                    std.math.fabs(m_pos.y - nodes[value].m_pos.y) <= f_size.y)
+                if (std.math.fabs(m_pos.x - positions[value].x) <= f_size.x and
+                    std.math.fabs(m_pos.y - positions[value].y) <= f_size.y)
                 {
-                    callback.onOverlap(nodes[value].entity);
+                    callback.onOverlap(entities[value]);
                 }
-                current_idx = nodes[value].getNext();
+                current_idx = Node.getNext(value, next);
             }
         }
-        current_x = begin_x;
     }
 }
-fn posToCell(self: Self, pos: Vec2) u32 {
+fn posToCell(self: Grid, pos: Vec2) u32 {
     const x = self.posToGridX(pos.x);
     const y = self.posToGridY(pos.y);
     return self.cellIndex(x, y);
 }
 
-fn posToGridX(self: Self, x: f32) u32 {
+fn posToGridX(self: Grid, x: f32) u32 {
     const local_x = x - self.pos.x;
     return self.localPosToIdx(local_x, self.num_rows);
 }
 
-fn posToGridY(self: Self, y: f32) u32 {
+fn posToGridY(self: Grid, y: f32) u32 {
     const local_y = y - self.pos.y;
     return self.localPosToIdx(local_y, self.num_cols);
 }
 
-fn localPosToIdx(self: Self, value: f32, cells: u32) u32 {
+fn localPosToIdx(self: Grid, value: f32, cells: u32) u32 {
     if (value < 0) return 0;
     return std.math.min(@floatToInt(u32, value * self.inv_cells_size), cells - 1);
 }
 
-fn cellIndex(self: Self, grid_x: u32, grid_y: u32) u32 {
+fn cellIndex(self: Grid, grid_x: u32, grid_y: u32) u32 {
     return grid_y * self.num_rows + grid_x;
 }
 
 test "cell index" {
     const scale = 4;
-    var grid = Self.init(
+    var grid = Grid.init(
         testing.allocator,
         Vec2.new(0, 0),
         @intToFloat(f32, scale) / 4,
@@ -250,7 +251,7 @@ test "cell index" {
 
 test "Performance\n" {
     const builtin = @import("builtin");
-    if(builtin.mode == .Debug){
+    if (builtin.mode == .Debug) {
         return error.SkipZigTest;
     }
     const x = 100;
@@ -263,7 +264,7 @@ test "Performance\n" {
         half_size: f32,
     });
     const allocator = std.testing.allocator;
-    var grid = Self.init(
+    var grid = Grid.init(
         testing.allocator,
         Vec2.new(0, 0),
         @intToFloat(f32, size) / 4,
