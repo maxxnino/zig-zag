@@ -2,114 +2,90 @@ const std = @import("std");
 const log = std.log.scoped(.dynamic_tree);
 const assert = std.debug.assert;
 const basic_type = @import("basic_type.zig");
-const IndexLinkList = @import("IndexLinkList.zig");
+
 const Rect = basic_type.Rect;
 const Vec2 = basic_type.Vec2;
-const Index = basic_type.Index;
-const node_null = basic_type.node_null;
+const Index = u32;
 
 const DynamicTree = @This();
-pub const Child = struct {
-    left: u32 = node_null,
-    right: u32 = node_null,
-};
 const Node = struct {
+    child1: Index = node_null,
+    child2: Index = node_null,
     parent: Index = node_null,
-    data: Index = node_null,
     height: i16 = 0,
     aabb: Rect = Rect.zero(),
-    tag: Tag,
-    const Tag = enum {
-        /// Data is entity
-        entity,
-        /// Data is index into Child ArrayList
-        child,
-    };
 };
 
 const NodeList = std.MultiArrayList(Node);
+const node_null = std.math.maxInt(Index);
 
 root: Index,
-free_list: IndexLinkList,
-child_free: IndexLinkList,
+free_list: Index,
 node_list: NodeList,
 nodes: NodeList.Slice,
-childs: std.ArrayList(Child),
 allocator: *std.mem.Allocator,
 
 pub fn init(allocator: *std.mem.Allocator) DynamicTree {
     var node_list = NodeList{};
     return .{
         .root = node_null,
-        .free_list = IndexLinkList{},
-        .child_free = IndexLinkList{},
+        .free_list = node_null,
         .node_list = NodeList{},
         .nodes = node_list.slice(),
-        .childs = std.ArrayList(Child).init(allocator),
         .allocator = allocator,
     };
 }
 
 pub fn deinit(self: *DynamicTree) void {
     self.node_list.deinit(self.allocator);
-    self.childs.deinit();
 }
 
-pub fn query(self: DynamicTree, aabb: Rect, entity: Index, allocator: *std.mem.Allocator, callback: anytype) !void {
-    const CallBackType = std.meta.Child(@TypeOf(callback));
-    if (!@hasDecl(CallBackType, "onOverlap")) {
+pub fn query(self: DynamicTree, aabb: Rect, allocator: *std.mem.Allocator, callback: anytype) !void {
+    if (!@hasDecl(std.meta.Child(@TypeOf(callback)), "onOverlap")) {
         @compileError("Expect " ++ @typeName(@TypeOf(callback)) ++ " has onCallback function");
     }
-    const have_filter = @hasDecl(CallBackType, "filter");
     var stack = std.ArrayList(Index).init(allocator);
     defer stack.deinit();
     try stack.append(self.root);
-    const childs = self.childs.items;
     const aabbs = self.nodes.items(.aabb);
-    const data = self.nodes.items(.data);
-    const tag = self.nodes.items(.tag);
+    const child1s = self.nodes.items(.child1);
+    const child2s = self.nodes.items(.child2);
     while (stack.items.len > 0) {
         const node_id = stack.pop();
         if (node_id == node_null) continue;
 
         if (aabbs[node_id].testOverlap(aabb)) {
-            if (tag[node_id] == .entity) {
-                if (data[node_id] == entity) continue;
-                if (have_filter) {
-                    if (!callback.filter(data[node_id], entity)) continue;
-                }
+            if (isLeaf(node_id, child1s)) {
+                callback.onOverlap(node_id);
             } else {
-                try stack.append(childs[data[node_id]].left);
-                try stack.append(childs[data[node_id]].right);
+                try stack.append(child1s[node_id]);
+                try stack.append(child2s[node_id]);
             }
         }
     }
 }
-// pub fn print(self: DynamicTree, extra: []const u8) void {
-//     const h = self.nodes.items(.height);
-//     const c1 = self.nodes.items(.child1);
-//     const c2 = self.nodes.items(.child2);
-//     const p = self.nodes.items(.parent);
-//     log.debug("==== {s} ====\n", .{extra});
-//     log.debug("height: {any}\n", .{h});
-//     log.debug("child1: {any}\n", .{c1});
-//     log.debug("child2: {any}\n", .{c2});
-//     log.debug("parent: {any}\n", .{p});
-//     var next = self.free_list;
-//     log.debug("free_list: ", .{});
-//     while (next != node_null) : (next = c1[next]) {
-//         log.debug("{},", .{next});
-//     }
-//     std.debug.print("\n", .{});
-// }
+pub fn print(self: DynamicTree, extra: []const u8) void {
+    const h = self.nodes.items(.height);
+    const c1 = self.nodes.items(.child1);
+    const c2 = self.nodes.items(.child2);
+    const p = self.nodes.items(.parent);
+    log.debug("==== {s} ====\n", .{extra});
+    log.debug("height: {any}\n", .{h});
+    log.debug("child1: {any}\n", .{c1});
+    log.debug("child2: {any}\n", .{c2});
+    log.debug("parent: {any}\n", .{p});
+    var next = self.free_list;
+    log.debug("free_list: ", .{});
+    while (next != node_null) : (next = c1[next]) {
+        log.debug("{},", .{next});
+    }
+    std.debug.print("\n", .{});
+}
 
-pub fn addNode(self: *DynamicTree, aabb: Rect, entity: Index) Index {
-    const node_id = self.allocateNode(.{
-        .data = entity,
-        .aabb = aabb,
-        .height = 0,
-        .tag = .entity,
-    });
+pub fn addNode(self: *DynamicTree, aabb: Rect) Index {
+    const node_id = self.allocateNode();
+    self.nodes.items(.aabb)[node_id] = aabb;
+    self.nodes.items(.height)[node_id] = 0;
     self.insertLeaf(node_id);
     return node_id;
 }
@@ -135,39 +111,36 @@ pub fn moveNode(tree: *DynamicTree, node_id: Index, aabb: Rect) bool {
     return true;
 }
 
-fn allocateNode(self: *DynamicTree, node: Node) Index {
-    const node_id = self.free_list.popFirst(self.nodes.items(.parent));
+fn allocateNode(self: *DynamicTree) Index {
+    const node_id = self.popFreeNode();
     if (node_id) |value| {
-        self.node_list.set(value, node);
+        self.node_list.set(value, .{});
         return value;
     }
 
-    self.node_list.append(self.allocator, node) catch unreachable;
+    self.node_list.append(self.allocator, .{}) catch unreachable;
     self.nodes = self.node_list.slice();
     return @intCast(Index, self.node_list.len - 1);
 }
 
-fn allocateChild(self: *DynamicTree) Index {
-    const child_index = self.child_free.popChild(self.childs.items);
-    if (child_index) |value| {
-        return value;
-    }
-
-    self.childs.append(.{}) catch unreachable;
-    return @intCast(Index, self.childs.items.len - 1);
+fn addFreeNode(self: *DynamicTree, free_node_index: Index, child1: []Index) void {
+    child1[free_node_index] = self.free_list;
+    self.free_list = free_node_index;
 }
-fn allocateParent(self: *DynamicTree) Index {
-    const child_index = self.allocateChild();
-    return self.allocateNode(.{ .height = -1, .data = child_index, .tag = .child});
+
+fn popFreeNode(self: *DynamicTree) ?Index {
+    if (self.free_list == node_null) return null;
+    const first = self.free_list;
+    self.free_list = self.nodes.items(.child1)[first];
+    return first;
 }
 
 fn freeNode(self: *DynamicTree, node_id: Index) void {
-    self.free_list.prepend(node_id, self.nodes.items(.parent));
-}
-
-fn freeParent(self: *DynamicTree, parent: Index, child: Index) void {
-    self.free_list.prepend(parent, self.nodes.items(.parent));
-    self.child_free.prependChild(child, self.childs.items);
+    // TODO: b2Assert(0 <= nodeId && nodeId < m_nodeCapacity);
+    var child1s = self.nodes.items(.child1);
+    self.nodes.items(.height)[node_id] = -1;
+    child1s[node_id] = node_null;
+    self.addFreeNode(node_id, child1s);
 }
 
 fn isLeaf(node_id: Index, child1s: []const Index) bool {
@@ -184,16 +157,14 @@ fn insertLeaf(self: *DynamicTree, leaf: Index) void {
     }
 
     // Find the best sibling for this node
-    var childs = self.childs.items;
     var aabbs = self.nodes.items(.aabb);
-    var tag = self.nodes.items(.tag);
-    var data = self.nodes.items(.data);
+    var child1s = self.nodes.items(.child1);
+    var child2s = self.nodes.items(.child2);
     const leaf_aabb = aabbs[leaf];
     var index = self.root;
-    while (tag[index] == .child) {
-        const i_data = data[index];
-        const child1 = childs[i_data].left;
-        const child2 = childs[i_data].right;
+    while (isLeaf(index, child1s) == false) {
+        const child1 = child1s[index];
+        const child2 = child2s[index];
 
         const area = aabbs[index].getPerimeter();
 
@@ -208,7 +179,7 @@ fn insertLeaf(self: *DynamicTree, leaf: Index) void {
 
         // Cost of descending into child1
         const cost1 = blk: {
-            if (tag[child1] == .entity) {
+            if (isLeaf(child1, child1s)) {
                 const aabb = leaf_aabb.combine(aabbs[child1]);
                 break :blk aabb.getPerimeter() + inheritance_cost;
             } else {
@@ -221,7 +192,7 @@ fn insertLeaf(self: *DynamicTree, leaf: Index) void {
 
         // Cost of descending into child2
         const cost2 = blk: {
-            if (tag[child2] == .entity) {
+            if (isLeaf(child2, child1s)) {
                 const aabb = leaf_aabb.combine(aabbs[child2]);
                 break :blk aabb.getPerimeter() + inheritance_cost;
             } else {
@@ -247,7 +218,7 @@ fn insertLeaf(self: *DynamicTree, leaf: Index) void {
 
     // Create a new parent.
     const old_parent = parents[sibling];
-    const new_parent = self.allocateParent();
+    const new_parent = self.allocateNode();
 
     parents = self.nodes.items(.parent);
     aabbs = self.nodes.items(.aabb);
@@ -257,15 +228,14 @@ fn insertLeaf(self: *DynamicTree, leaf: Index) void {
     aabbs[new_parent] = leaf_aabb.combine(aabbs[sibling]);
     heights[new_parent] = heights[sibling] + 1;
 
-    childs = self.childs.items;
-    data = self.nodes.items(.data);
+    child1s = self.nodes.items(.child1);
+    child2s = self.nodes.items(.child2);
     if (old_parent != node_null) {
         // The sibling was not the root.
-        const old_parent_data = data[old_parent];
-        if (childs[old_parent_data].left == sibling) {
-            childs[old_parent_data].left = new_parent;
+        if (child1s[old_parent] == sibling) {
+            child1s[old_parent] = new_parent;
         } else {
-            childs[old_parent_data].right = new_parent;
+            child2s[old_parent] = new_parent;
         }
 
         parents[leaf] = new_parent;
@@ -274,19 +244,17 @@ fn insertLeaf(self: *DynamicTree, leaf: Index) void {
         parents[leaf] = new_parent;
         self.root = new_parent;
     }
-    const new_parent_data = data[new_parent];
-    childs[new_parent_data].left = sibling;
-    childs[new_parent_data].right = leaf;
+    child1s[new_parent] = sibling;
+    child2s[new_parent] = leaf;
     parents[sibling] = new_parent;
 
     // Walk back up the tree fixing heights and AABBs
     var i = parents[leaf];
     while (i != node_null) : (i = parents[i]) {
         i = self.balance(i);
-        const i_data = data[i];
 
-        const child1 = childs[i_data].left;
-        const child2 = childs[i_data].right;
+        const child1 = child1s[i];
+        const child2 = child2s[i];
 
         assert(child1 != node_null);
 
@@ -299,18 +267,16 @@ fn insertLeaf(self: *DynamicTree, leaf: Index) void {
 }
 fn balance(self: *DynamicTree, node_id: Index) Index {
     var heights = self.nodes.items(.height);
-    const tag = self.nodes.items(.tag);
+    var child1s = self.nodes.items(.child1);
     assert(node_id != node_null);
     const ia = node_id;
-    if (tag[ia] == .entity or heights[ia] < 2) {
+    if (isLeaf(ia, child1s) or heights[ia] < 2) {
         return ia;
     }
-    const data = self.nodes.items(.data);
 
-    var childs = self.childs.items;
-    const ia_data = data[ia];
-    const ib = childs[ia_data].left;
-    const ic = childs[ia_data].right;
+    var child2s = self.nodes.items(.child2);
+    const ib = child1s[ia];
+    const ic = child2s[ia];
     // TODO: b2Assert(0 <= iB && iB < m_nodeCapacity);
     //b2Assert(0 <= iC && iC < m_nodeCapacity);
 
@@ -321,38 +287,36 @@ fn balance(self: *DynamicTree, node_id: Index) Index {
     // Rotate C up
     if (balance_height > 1) {
         var parents = self.nodes.items(.parent);
-        const ic_data = data[ic];
-        const @"if" = childs[ic_data].left;
-        const ig = childs[ic_data].right;
+        const @"if" = child1s[ic];
+        const ig = child2s[ic];
         // var f = &self.nodes[@"if"];
         // var g = &self.nodes[ig];
         // TODO: b2Assert(0 <= iF && iF < m_nodeCapacity);
         //b2Assert(0 <= iG && iG < m_nodeCapacity);
 
         // Swap A and C
-        childs[ic_data].left = ia;
+        child1s[ic] = ia;
         parents[ic] = parents[ia];
         parents[ia] = ic;
 
         // A's old parent should point to C
         if (parents[ic] != node_null) {
             const c_parent = parents[ic];
-            const c_parent_data = data[c_parent];
-            if (childs[c_parent_data].left == ia) {
-                childs[c_parent_data].left = ic;
+            if (child1s[c_parent] == ia) {
+                child1s[c_parent] = ic;
             } else {
-                assert(childs[c_parent_data].right == ia);
-                childs[c_parent_data].right = ic;
+                assert(child2s[c_parent] == ia);
+                child2s[c_parent] = ic;
             }
         } else {
             self.root = ic;
         }
 
         // Rotate
-        var aabbs = self.nodes.items(.aabb);
         if (heights[@"if"] > heights[ig]) {
-            childs[ic_data].right = @"if";
-            childs[ia_data].right = ig;
+            var aabbs = self.nodes.items(.aabb);
+            child2s[ic] = @"if";
+            child2s[ia] = ig;
             parents[ig] = ia;
             aabbs[ia] = aabbs[ib].combine(aabbs[ig]);
             aabbs[ic] = aabbs[ia].combine(aabbs[@"if"]);
@@ -360,8 +324,9 @@ fn balance(self: *DynamicTree, node_id: Index) Index {
             heights[ia] = 1 + std.math.max(heights[ib], heights[ig]);
             heights[ic] = 1 + std.math.max(heights[ia], heights[@"if"]);
         } else {
-            childs[ic_data].right = ig;
-            childs[ia_data].right = @"if";
+            var aabbs = self.nodes.items(.aabb);
+            child2s[ic] = ig;
+            child2s[ia] = @"if";
             parents[@"if"] = ia;
             aabbs[ia] = aabbs[ib].combine(aabbs[@"if"]);
             aabbs[ic] = aabbs[ia].combine(aabbs[ig]);
@@ -376,38 +341,36 @@ fn balance(self: *DynamicTree, node_id: Index) Index {
     // Rotate B up
     if (balance_height < -1) {
         var parents = self.nodes.items(.parent);
-        const ib_data = data[ib];
-        const id = childs[ib_data].left;
-        const ie = childs[ib_data].right;
+        const id = child1s[ib];
+        const ie = child2s[ib];
         // var d = &self.nodes[id];
         // var e = &self.nodes[ie];
         // TODO: b2Assert(0 <= iD && iD < m_nodeCapacity);
         //b2Assert(0 <= iE && iE < m_nodeCapacity);
 
         // Swap A and B
-        childs[ib_data].left = ia;
+        child1s[ib] = ia;
         parents[ib] = parents[ia];
         parents[ia] = ib;
 
         // A's old parent should point to B
         if (parents[ib] != node_null) {
             const b_parent = parents[ib];
-            const b_parent_data = data[b_parent];
-            if (childs[b_parent_data].left == ia) {
-                childs[b_parent_data].left = ib;
+            if (child1s[b_parent] == ia) {
+                child1s[b_parent] = ib;
             } else {
-                assert(childs[b_parent_data].right == ia);
-                childs[b_parent_data].right = ib;
+                assert(child2s[b_parent] == ia);
+                child2s[b_parent] = ib;
             }
         } else {
             self.root = ib;
         }
 
         // Rotate
-        var aabbs = self.nodes.items(.aabb);
         if (heights[id] > heights[ie]) {
-            childs[ib_data].right = id;
-            childs[ia_data].left = ie;
+            var aabbs = self.nodes.items(.aabb);
+            child2s[ib] = id;
+            child1s[ia] = ie;
             parents[ie] = ia;
             aabbs[ia] = aabbs[ic].combine(aabbs[ie]);
             aabbs[ib] = aabbs[ia].combine(aabbs[id]);
@@ -415,8 +378,9 @@ fn balance(self: *DynamicTree, node_id: Index) Index {
             heights[ia] = 1 + std.math.max(heights[ic], heights[ie]);
             heights[ib] = 1 + std.math.max(heights[ia], heights[id]);
         } else {
-            childs[ib_data].right = ie;
-            childs[ia_data].left = id;
+            var aabbs = self.nodes.items(.aabb);
+            child2s[ib] = ie;
+            child1s[ia] = id;
             parents[id] = ia;
             aabbs[ia] = aabbs[ic].combine(aabbs[id]);
             aabbs[ib] = aabbs[ia].combine(aabbs[ie]);
@@ -437,21 +401,19 @@ fn removeLeaf(self: *DynamicTree, leaf: Index) void {
         return;
     }
     var parents = self.nodes.items(.parent);
-    var data = self.nodes.items(.data);
-    var childs = self.childs.items;
+    var child1s = self.nodes.items(.child1);
+    var child2s = self.nodes.items(.child2s);
     const parent = parents[leaf];
-    const grand_parent = parents[parent];
-    const parent_data = data[parent];
-    const sibling = if (childs[parent_data].left == leaf) childs[parent_data].right else childs[parent_data].left;
+    var grand_parent = parents[parent];
+    const sibling = if (child1s[parent] == leaf) child2s[parent] else child1s[parent];
 
-    self.freeParent(parent);
+    self.freeNode(parent);
     if (grand_parent != node_null) {
         // Destroy parent and connect sibling to grandParent.
-        const grand_parent_data = data[grand_parent];
-        if (childs[grand_parent_data].left == parent) {
-            childs[grand_parent_data].left = sibling;
+        if (child1s[grand_parent] == parent) {
+            child1s[grand_parent] = sibling;
         } else {
-            childs[grand_parent_data].right = sibling;
+            child2s[grand_parent] = sibling;
         }
         parents[sibling] = grand_parent;
 
@@ -461,10 +423,9 @@ fn removeLeaf(self: *DynamicTree, leaf: Index) void {
         var heights = self.nodes.items(.height);
         while (index != node_null) : (index = parents[index]) {
             index = self.balance(index);
-            const i_data = data[index];
 
-            const child1 = childs[i_data].left;
-            const child2 = childs[i_data].right;
+            const child1 = child1s[index];
+            const child2 = child2s[index];
 
             aabbs[index] = aabbs[child1].combine(aabbs[child2]);
             heights[index] = 1 + std.math.max(heights[child1], heights[child2]);
@@ -505,8 +466,8 @@ test "behavior" {
         Vec2.new(-3, -3),
         Vec2.new(2, -1),
     ));
-    for (rects.items) |entry, i| {
-        _ = dt.addNode(entry, @intCast(u32, i));
+    for (rects.items) |entry| {
+        _ = dt.addNode(entry);
     }
 
     {
@@ -520,8 +481,8 @@ test "behavior" {
         };
         var callback = QueryCallback{};
         var allocator = std.heap.FixedBufferAllocator.init(callback.buffer[0..callback.buffer.len]);
-        for (rects.items) |aabb, i| {
-            try dt.query(aabb, @intCast(u32, i), &allocator.allocator, &callback);
+        for (rects.items) |aabb| {
+            try dt.query(aabb, &allocator.allocator, &callback);
         }
     }
 }
@@ -557,7 +518,7 @@ test "Performance\n" {
                     floatFromRange(random, min_size, max_size),
                 ),
             );
-            _ = dt.addNode(aabb, entity);
+            _ = dt.addNode(aabb);
             try entities.append(aabb);
         }
         const time_0 = timer.read();
@@ -577,8 +538,8 @@ test "Performance\n" {
         var callback = QueryCallback{};
         var allocator = std.heap.FixedBufferAllocator.init(callback.buffer[0..callback.buffer.len]);
         var timer = try std.time.Timer.start();
-        for (entities.items) |aabb, i| {
-            try dt.query(aabb, @intCast(u32, i), &allocator.allocator, &callback);
+        for (entities.items) |aabb| {
+            try dt.query(aabb, &allocator.allocator, &callback);
         }
         var time_0 = timer.read();
         std.debug.print("callback query {} entity, with {} callback take {}ms\n", .{
