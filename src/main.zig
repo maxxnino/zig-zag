@@ -3,4 +3,5 @@ test {
     _ = @import("rect.zig");
     _ = @import("DynamicTree.zig");
     _ = @import("Grid.zig");
+    _ = @import("Grid2.zig");
 }

@@ -92,21 +92,17 @@ const Row = struct {
         var lists = self.lists.items;
         var next = self.nodes.items(.next);
         var entities = self.nodes.items(.entity);
-        var index = lists[cell_x].popFirst(next);
+        var node = lists[cell_x].getFirst().?;
         var prev_idx: ?Index = null;
-        assert(index != null);
-        while (index) |value| {
-            if (entities[value] == entity) {
-                const removed_index = if (prev_idx) |entry| {
-                    Node.removeNext(entry, next).?;
-                } else value;
-                return self.free_list.prepend(removed_index, next);
-            }
-            prev_idx = value;
-            index = Node.getNext(value, next);
+        while (entities[node] != entity) {
+            prev_idx = node;
+            node = Node.getNext(node, next).?;
         }
-
-        unreachable;
+        if (prev_idx) |prev| {
+            next[prev] = next[node];
+        } else {
+            lists[cell_x].first = next[node];
+        }
     }
 
     fn ensureInitLists(self: *Row, num_cols: u32) void {
@@ -116,9 +112,13 @@ const Row = struct {
     }
 
     fn query(row: Row, begin_x: u32, end_x: u32, m_pos: Vec2, f_size: Vec2, entity: u32, callback: anytype) void {
-        if (!@hasDecl(std.meta.Child(@TypeOf(callback)), "onOverlap")) {
+        const CallBackType = std.meta.Child(@TypeOf(callback));
+        if (!@hasDecl(CallBackType, "onOverlap")) {
             @compileError("Expect " ++ @typeName(@TypeOf(callback)) ++ " has onCallback function");
         }
+        // if (!@hasDecl(CallBackType, "filter")) {
+        //     @compileError("Expect " ++ @typeName(@TypeOf(callback)) ++ " has filter function");
+        // }
         // _ = entity;
         if (row.total == 0) return;
         const lists = row.lists.items;
@@ -130,6 +130,7 @@ const Row = struct {
             var current_idx = lists[current_x].getFirst();
             while (current_idx) |value| {
                 if (entities[value] != entity and
+                    // callback.filter(entities[value], entity) and
                     std.math.fabs(m_pos.x - positions[value].x) <= f_size.x and
                     std.math.fabs(m_pos.y - positions[value].y) <= f_size.y)
                 {
@@ -190,6 +191,10 @@ pub fn init(
     };
 }
 
+fn isNull(node: Index) bool {
+    return node != node_null;
+}
+
 pub fn deinit(self: *Grid) void {
     for (self.rows.items) |*row| {
         row.deinit();
@@ -197,36 +202,49 @@ pub fn deinit(self: *Grid) void {
     self.rows.deinit();
 }
 
-pub fn insert(self: *Grid, entity: Index, pos: Vec2) !void {
-    const cell_y = self.posToGridY(pos);
+pub fn insert(self: *Grid, entity: Index, m_pos: Vec2) !void {
+    const cell_y = self.posToGridYOrNull(m_pos) orelse return;
+    const cell_x = self.posToGridXOrNull(m_pos) orelse return;
     var row = &self.rows.items[cell_y];
     row.ensureInitLists(self.num_cols);
 
-    const cell_x = self.posToGridX(pos);
     row.insertToCell(cell_x, Node{
         .entity = entity,
-        .m_pos = pos,
+        .m_pos = m_pos,
     });
 }
 
 pub fn remove(self: *Grid, entity: Index, m_pos: Vec2) void {
-    const cell_y = self.posToGridY(m_pos);
-    const cell_x = self.posToGridX(m_pos);
+    const cell_y = self.posToGridYOrNull(m_pos) orelse return;
+    const cell_x = self.posToGridXOrNull(m_pos) orelse return;
     self.rows.items[cell_y].removeFromCell(cell_x, entity);
 }
 
 pub fn move(self: *Grid, entity: Index, from_pos: Vec2, to_pos: Vec2) void {
-    var from_cell_y = self.posToGridY(from_pos);
-    var to_cell_y = self.posToGridY(to_pos);
-    var from_cell_x = self.posToGridX(from_pos);
-    var to_cell_x = self.posToGridX(to_pos);
-    if (from_cell_x != to_cell_x or from_cell_y != from_cell_y) {
-        var rows = self.rows.items;
-        rows[from_cell_y].removeFromCell(from_cell_x, entity);
-        rows[to_cell_y].ensureInitLists(self.num_cols);
-        rows[to_cell_y].insertToCell(to_cell_x, Node{
+    const from_opt_x = self.posToGridXOrNull(from_pos);
+    const from_opt_y = self.posToGridYOrNull(from_pos);
+    const to_opt_x = self.posToGridXOrNull(to_pos);
+    const to_opt_y = self.posToGridYOrNull(to_pos);
+    const can_remove = from_opt_x != null and from_opt_y != null;
+    const can_insert = to_opt_x != null and to_opt_y != null;
+    var rows = self.rows.items;
+    if (can_remove) {
+        if (can_insert) {
+            if (from_opt_x.? == to_opt_x.? and from_opt_y.? == to_opt_y.?) return;
+            rows[from_opt_y.?].removeFromCell(from_opt_x.?, entity);
+            rows[to_opt_y.?].ensureInitLists(self.num_cols);
+            rows[to_opt_y.?].insertToCell(to_opt_x.?, Node{
+                .entity = entity,
+                .m_pos = to_pos,
+            });
+        } else {
+            rows[from_opt_y.?].removeFromCell(from_opt_x.?, entity);
+        }
+    } else if (can_insert) {
+        rows[to_opt_y.?].ensureInitLists(self.num_cols);
+        rows[to_opt_y.?].insertToCell(to_opt_x.?, Node{
             .entity = entity,
-            .pos = to_pos,
+            .m_pos = to_pos,
         });
     }
 }
@@ -235,39 +253,56 @@ pub fn query(grid: *Grid, m_pos: Vec2, h_size: Vec2, entity: u32, callback: anyt
     const f_size = h_size.add(grid.h_size);
     const extend_left = m_pos.sub(f_size);
     const extend_right = m_pos.add(f_size);
-    const begin_x = grid.posToGridX(extend_left);
-    const end_x = grid.posToGridX(extend_right);
-    const end_y = grid.posToGridY(extend_right);
-    var current_y = grid.posToGridY(extend_left);
+    const begin_x = grid.posToGridXClamp(extend_left);
+    const end_x = grid.posToGridXClamp(extend_right);
+    if (end_x < begin_x) return;
+
+    const end_y = grid.posToGridYClamp(extend_right);
+    var current_y = grid.posToGridYClamp(extend_left);
     var rows = grid.rows.items;
     while (current_y <= end_y) : (current_y += 1) {
         rows[current_y].query(begin_x, end_x, m_pos, f_size, entity, callback);
     }
 }
 
-fn posToCell(self: Grid, pos: Vec2) u32 {
-    const x = self.posToGridX(pos);
-    const y = self.posToGridY(pos);
-    return self.cellIndex(x, y);
-}
-
-fn posToGridX(self: Grid, pos: Vec2) u32 {
+fn posToGridXOrNull(self: Grid, pos: Vec2) ?u32 {
     const local_x = pos.x - self.pos.x;
-    return self.localPosToIdx(local_x, self.num_rows);
+    return self.localPosToIdxOrNull(local_x, self.num_rows);
 }
 
-fn posToGridY(self: Grid, pos: Vec2) u32 {
+fn posToGridYOrNull(self: Grid, pos: Vec2) ?u32 {
     const local_y = pos.y - self.pos.y;
-    return self.localPosToIdx(local_y, self.num_cols);
+    return self.localPosToIdxOrNull(local_y, self.num_cols);
 }
 
-fn localPosToIdx(self: Grid, value: f32, cells: u32) u32 {
+fn localPosToIdxOrNull(self: Grid, value: f32, cells: u32) ?u32 {
+    if (value < 0) return null;
+    const idx = @floatToInt(u32, value * self.inv_cells_size);
+    return if (idx < cells) idx else null;
+}
+
+fn posToGridXClamp(self: Grid, pos: Vec2) u32 {
+    const local_x = pos.x - self.pos.x;
+    return self.localPosToIdxClamp(local_x, self.num_rows);
+}
+
+fn posToGridYClamp(self: Grid, pos: Vec2) u32 {
+    const local_y = pos.y - self.pos.y;
+    return self.localPosToIdxClamp(local_y, self.num_cols);
+}
+
+fn localPosToIdxClamp(self: Grid, value: f32, cells: u32) u32 {
     if (value < 0) return 0;
     return std.math.min(@floatToInt(u32, value * self.inv_cells_size), cells - 1);
 }
 
-fn cellIndex(self: Grid, grid_x: u32, grid_y: u32) u32 {
-    return grid_y * self.num_rows + grid_x;
+fn debugPrint(grid: Grid) void {
+    var total: u32 = 0;
+    for (grid.rows.items) |row| {
+        std.debug.print("{},", .{row.total});
+        total += row.total;
+    }
+    std.debug.print("\ntotal {}\n", .{total});
 }
 
 test "cell index" {
@@ -281,14 +316,14 @@ test "cell index" {
         2,
     );
     defer grid.deinit();
-    try testing.expectEqual(grid.posToCell(Vec2.new(0 * scale, 0 * scale)), 0);
-    try testing.expectEqual(grid.posToCell(Vec2.new(0 * scale, 1 * scale)), 2);
-    try testing.expectEqual(grid.posToCell(Vec2.new(1 * scale, 0 * scale)), 1);
-    try testing.expectEqual(grid.posToCell(Vec2.new(1 * scale, 1 * scale)), 3);
-    try testing.expectEqual(grid.posToCell(Vec2.new(-1 * scale, -1 * scale)), 0);
-    try testing.expectEqual(grid.posToCell(Vec2.new(2 * scale, 0 * scale)), 1);
-    try testing.expectEqual(grid.posToCell(Vec2.new(0 * scale, 2 * scale)), 2);
-    try testing.expectEqual(grid.posToCell(Vec2.new(2 * scale, 2 * scale)), 3);
+    // try testing.expectEqual(grid.posToCell(Vec2.new(0 * scale, 0 * scale)), 0);
+    // try testing.expectEqual(grid.posToCell(Vec2.new(0 * scale, 1 * scale)), 2);
+    // try testing.expectEqual(grid.posToCell(Vec2.new(1 * scale, 0 * scale)), 1);
+    // try testing.expectEqual(grid.posToCell(Vec2.new(1 * scale, 1 * scale)), 3);
+    // try testing.expectEqual(grid.posToCell(Vec2.new(-1 * scale, -1 * scale)), 0);
+    // try testing.expectEqual(grid.posToCell(Vec2.new(2 * scale, 0 * scale)), 1);
+    // try testing.expectEqual(grid.posToCell(Vec2.new(0 * scale, 2 * scale)), 2);
+    // try testing.expectEqual(grid.posToCell(Vec2.new(2 * scale, 2 * scale)), 3);
 }
 
 test "Performance\n" {
@@ -296,10 +331,10 @@ test "Performance\n" {
     // if (builtin.mode == .Debug) {
     //     return error.SkipZigTest;
     // }
-    const x = 40;
-    const y = 40;
+    const x = 100;
+    const y = 100;
     const size = 4;
-    const total = 20 * 20;
+    const total = x * y * 8;
     var random = std.rand.Xoshiro256.init(0).random();
     const Entity = std.MultiArrayList(struct {
         entity: u32,
@@ -322,8 +357,8 @@ test "Performance\n" {
     {
         var entity: u32 = 0;
         while (entity < total) : (entity += 1) {
-            const x_pos = random.float(f32) * @intToFloat(f32, x * y * size * size);
-            const y_pos = random.float(f32) * @intToFloat(f32, x * y * size * size);
+            const x_pos = random.float(f32) * @intToFloat(f32, x * size);
+            const y_pos = random.float(f32) * @intToFloat(f32, y * size);
             const pos = Vec2.new(x_pos, y_pos);
             try manager.append(allocator, .{
                 .entity = entity,
@@ -331,18 +366,7 @@ test "Performance\n" {
                 .half_size = 1.0,
             });
         }
-        try manager.append(allocator, .{
-            .entity = entity + 1,
-            .pos = Vec2.new(1, 1),
-            .half_size = 1.0,
-        });
-        try manager.append(allocator, .{
-            .entity = entity + 2,
-            .pos = Vec2.new(1, 1),
-            .half_size = 1.0,
-        });
     }
-
     var slice = manager.slice();
     var entities = slice.items(.entity);
     var position = slice.items(.pos);
@@ -354,29 +378,51 @@ test "Performance\n" {
             grid.insert(entities[index], position[index]) catch unreachable;
         }
         const time_0 = timer.read();
-        std.debug.print("add {} entity take {}ms\n", .{ x * y, time_0 / std.time.ns_per_ms });
+        std.debug.print("add {} entity take {}ms\n", .{ total, time_0 / std.time.ns_per_ms });
     }
-
-    {
-        const QueryCallback = struct {
-            total: u32 = 0,
-            pub fn onOverlap(self: *@This(), entity: u32) void {
-                _ = entity;
-                self.total += 1;
+    const total_loop = 20;
+    var current_loop: u32 = 0;
+    var move_time: u64 = 0;
+    var query_time: u64 = 0;
+    while (current_loop < total_loop) : (current_loop += 1) {
+        {
+            var timer = try std.time.Timer.start();
+            var entity: u32 = 0;
+            while (entity < total) : (entity += 1) {
+                const x_pos = random.float(f32) * @intToFloat(f32, x * size);
+                const y_pos = random.float(f32) * @intToFloat(f32, y * size);
+                const pos = Vec2.new(x_pos, y_pos);
+                grid.move(entities[entity], position[entity], pos);
+                position[entity] = pos;
             }
-        };
-        var callback = QueryCallback{};
-        var entity: u32 = 0;
-        const esize = Vec2.new(size / 4, size / 4);
-        var timer = try std.time.Timer.start();
-        while (entity < slice.len) : (entity += 1) {
-            grid.query(position[entity], esize, entity, &callback);
+            const time_0 = timer.read();
+            move_time += time_0 / std.time.ns_per_ms;
         }
-        const time_0 = timer.read();
-        std.debug.print("callback query {} entity, with {} callback take {}ms\n", .{
-            total,
-            callback.total,
-            time_0 / std.time.ns_per_ms,
-        });
+        {
+            const QueryCallback = struct {
+                total: u32 = 0,
+                pub fn onOverlap(self: *@This(), entity: u32) void {
+                    _ = entity;
+                    self.total += 1;
+                }
+                pub fn filter(self: @This(), e1: u32, e2: u32) bool {
+                    _ = self;
+                    return e1 < e2;
+                }
+            };
+            var callback = QueryCallback{};
+            var entity: u32 = 0;
+            const esize = Vec2.new(size / 4, size / 4);
+            var timer = try std.time.Timer.start();
+            while (entity < slice.len) : (entity += 1) {
+                grid.query(position[entity], esize, entities[entity], &callback);
+            }
+            const time_0 = timer.read();
+            query_time += time_0 / std.time.ns_per_ms;
+        }
     }
+    std.debug.print("move take {}ms\n", .{move_time / total_loop});
+    std.debug.print("query take {}ms\n", .{query_time / total_loop});
+
+    // grid.debugPrint();
 }
