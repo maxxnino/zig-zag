@@ -10,7 +10,7 @@ const Vec2 = basic_type.Vec2;
 const node_null = std.math.maxInt(Index);
 const Node = struct {
     /// Stores the next element in the cell.
-    next: u32 = node_null,
+    next: u32,
     /// Stores the ID of the element. This can be used to associate external
     /// data to the element.
     entity: Index,
@@ -51,101 +51,7 @@ const IndexLinkList = struct {
         return first;
     }
 };
-
-const Row = struct {
-    const NodeList = std.MultiArrayList(Node);
-    nodes: NodeList.Slice,
-    node_list: NodeList,
-    lists: std.ArrayList(IndexLinkList),
-    free_list: IndexLinkList,
-    allocator: *std.mem.Allocator,
-    total: u32 = 0,
-
-    fn init(allocator: *std.mem.Allocator) Row {
-        var node_list = NodeList{};
-        return .{
-            .lists = std.ArrayList(IndexLinkList).init(allocator),
-            .nodes = node_list.slice(),
-            .node_list = node_list,
-            .free_list = IndexLinkList{},
-            .allocator = allocator,
-        };
-    }
-
-    fn insertToCell(self: *Row, cell_x: Index, elt: Node) void {
-        self.total += 1;
-        var next = self.nodes.items(.next);
-        const free_node = self.free_list.popFirst(next);
-        if (free_node) |index| {
-            self.node_list.set(index, elt);
-            return self.lists.items[cell_x].prepend(index, next);
-        }
-
-        const index = @intCast(Index, self.nodes.len);
-        self.node_list.append(self.allocator, elt) catch unreachable;
-        self.nodes = self.node_list.slice();
-        self.lists.items[cell_x].prepend(index, self.nodes.items(.next));
-    }
-
-    fn removeFromCell(self: *Row, cell_x: Index, entity: Index) void {
-        self.total -= 1;
-        var lists = self.lists.items;
-        var next = self.nodes.items(.next);
-        var entities = self.nodes.items(.entity);
-        var node = lists[cell_x].getFirst().?;
-        var prev_idx: ?Index = null;
-        while (entities[node] != entity) {
-            prev_idx = node;
-            node = Node.getNext(node, next).?;
-        }
-        if (prev_idx) |prev| {
-            next[prev] = next[node];
-        } else {
-            lists[cell_x].first = next[node];
-        }
-    }
-
-    fn ensureInitLists(self: *Row, num_cols: u32) void {
-        if (self.lists.items.len != 0) return;
-        self.lists.ensureTotalCapacity(num_cols + 1) catch unreachable;
-        self.lists.appendNTimesAssumeCapacity(.{}, num_cols + 1);
-    }
-
-    fn query(row: Row, begin_x: u32, end_x: u32, m_pos: Vec2, f_size: Vec2, entity: u32, callback: anytype) void {
-        const CallBackType = std.meta.Child(@TypeOf(callback));
-        if (!@hasDecl(CallBackType, "onOverlap")) {
-            @compileError("Expect " ++ @typeName(@TypeOf(callback)) ++ " has onCallback function");
-        }
-        // if (!@hasDecl(CallBackType, "filter")) {
-        //     @compileError("Expect " ++ @typeName(@TypeOf(callback)) ++ " has filter function");
-        // }
-        // _ = entity;
-        if (row.total == 0) return;
-        const lists = row.lists.items;
-        const next = row.nodes.items(.next);
-        const entities = row.nodes.items(.entity);
-        const positions = row.nodes.items(.m_pos);
-        var current_x = begin_x;
-        while (current_x <= end_x) : (current_x += 1) {
-            var current_idx = lists[current_x].getFirst();
-            while (current_idx) |value| {
-                if (entities[value] != entity and
-                    // callback.filter(entities[value], entity) and
-                    std.math.fabs(m_pos.x - positions[value].x) <= f_size.x and
-                    std.math.fabs(m_pos.y - positions[value].y) <= f_size.y)
-                {
-                    callback.onOverlap(entities[value]);
-                }
-                current_idx = Node.getNext(value, next);
-            }
-        }
-    }
-
-    fn deinit(self: *Row) void {
-        self.node_list.deinit(self.allocator);
-        self.lists.deinit();
-    }
-};
+const NodeList = std.MultiArrayList(Node);
 /// Stores the number of columns, rows, and cells in the grid.
 num_cols: u32,
 num_rows: u32,
@@ -163,7 +69,10 @@ pos: Vec2,
 // Stores the size of the grid.
 width: u32,
 height: u32,
-rows: std.ArrayList(Row),
+nodes: NodeList.Slice,
+node_list: NodeList,
+lists: std.ArrayList(IndexLinkList),
+free_list: IndexLinkList,
 allocator: *std.mem.Allocator,
 
 pub const InitInfo = struct {};
@@ -175,8 +84,7 @@ pub fn init(
     num_cols: u32,
     num_rows: u32,
 ) Grid {
-    var rows = std.ArrayList(Row).initCapacity(allocator, num_rows) catch unreachable;
-    rows.appendNTimesAssumeCapacity(Row.init(allocator), num_rows);
+    var node_list = NodeList{};
     return .{
         .inv_cells_size = 1.0 / cell_size,
         .num_cols = num_cols,
@@ -186,92 +94,138 @@ pub fn init(
         .width = num_rows * @floatToInt(u32, cell_size),
         .height = num_cols * @floatToInt(u32, cell_size),
         .h_size = Vec2.new(half_element_size, half_element_size),
-        .rows = rows,
+        .lists = std.ArrayList(IndexLinkList).init(allocator),
+        .nodes = node_list.slice(),
+        .node_list = node_list,
+        .free_list = IndexLinkList{},
         .allocator = allocator,
     };
 }
 
-fn isNull(node: Index) bool {
-    return node != node_null;
-}
-
 pub fn deinit(self: *Grid) void {
-    for (self.rows.items) |*row| {
-        row.deinit();
-    }
-    self.rows.deinit();
+    self.node_list.deinit(self.allocator);
+    self.lists.deinit();
 }
 
-pub fn insert(self: *Grid, entity: Index, m_pos: Vec2) !void {
-    const cell_y = self.posToGridYOrNull(m_pos) orelse return;
-    const cell_x = self.posToGridXOrNull(m_pos) orelse return;
-    var row = &self.rows.items[cell_y];
-    row.ensureInitLists(self.num_cols);
-
-    row.insertToCell(cell_x, Node{
+pub fn insert(self: *Grid, entity: Index, pos: Vec2) !void {
+    self.ensureInitLists();
+    const cell = self.posToCellOrNull(pos) orelse return;
+    self.insertToCell(cell, Node{
+        .next = node_null,
         .entity = entity,
-        .m_pos = m_pos,
+        .m_pos = pos,
     });
 }
 
+fn ensureInitLists(self: *Grid) void {
+    if (self.nodes.len != 0) return;
+    self.lists.appendNTimes(.{}, self.num_rows * self.num_cols) catch unreachable;
+}
+
 pub fn remove(self: *Grid, entity: Index, m_pos: Vec2) void {
-    const cell_y = self.posToGridYOrNull(m_pos) orelse return;
-    const cell_x = self.posToGridXOrNull(m_pos) orelse return;
-    self.rows.items[cell_y].removeFromCell(cell_x, entity);
+    const cell = self.posToCellOrNull(m_pos) orelse return;
+    self.removeFromCell(cell, entity);
 }
 
 pub fn move(self: *Grid, entity: Index, from_pos: Vec2, to_pos: Vec2) void {
-    const from_opt_x = self.posToGridXOrNull(from_pos);
-    const from_opt_y = self.posToGridYOrNull(from_pos);
-    const to_opt_x = self.posToGridXOrNull(to_pos);
-    const to_opt_y = self.posToGridYOrNull(to_pos);
-    const can_remove = from_opt_x != null and from_opt_y != null;
-    const can_insert = to_opt_x != null and to_opt_y != null;
-    var rows = self.rows.items;
-    if (can_remove) {
-        if (can_insert) {
-            if (from_opt_x.? == to_opt_x.? and from_opt_y.? == to_opt_y.?) return;
-            rows[from_opt_y.?].removeFromCell(from_opt_x.?, entity);
-            rows[to_opt_y.?].ensureInitLists(self.num_cols);
-            rows[to_opt_y.?].insertToCell(to_opt_x.?, Node{
-                .entity = entity,
-                .m_pos = to_pos,
-            });
-        } else {
-            rows[from_opt_y.?].removeFromCell(from_opt_x.?, entity);
-        }
-    } else if (can_insert) {
-        rows[to_opt_y.?].ensureInitLists(self.num_cols);
-        rows[to_opt_y.?].insertToCell(to_opt_x.?, Node{
+    var from_cell = self.posToCellOrNull(from_pos);
+    var to_cell = self.posToCellOrNull(to_pos);
+    const is_null = from_cell == null and to_cell == null;
+    if (!is_null and from_cell.? != to_cell.?) {
+        self.removeFromCell(from_cell.?, entity);
+        self.insertToCell(to_cell.?, Node{
+            .next = node_null,
             .entity = entity,
             .m_pos = to_pos,
         });
     }
 }
 
-pub fn query(grid: *Grid, m_pos: Vec2, h_size: Vec2, entity: u32, callback: anytype) void {
-    const f_size = h_size.add(grid.h_size);
-    const extend_left = m_pos.sub(f_size);
-    const extend_right = m_pos.add(f_size);
-    const begin_x = grid.posToGridXClamp(extend_left);
-    const end_x = grid.posToGridXClamp(extend_right);
-    if (end_x < begin_x) return;
+fn insertToCell(self: *Grid, cell: Index, elt: Node) void {
+    var next = self.nodes.items(.next);
+    const free_node = self.free_list.popFirst(next);
+    if (free_node) |index| {
+        self.node_list.set(index, elt);
+        return self.lists.items[cell].prepend(index, next);
+    }
 
-    const end_y = grid.posToGridYClamp(extend_right);
-    var current_y = grid.posToGridYClamp(extend_left);
-    var rows = grid.rows.items;
-    while (current_y <= end_y) : (current_y += 1) {
-        rows[current_y].query(begin_x, end_x, m_pos, f_size, entity, callback);
+    const index = @intCast(Index, self.nodes.len);
+    self.node_list.append(self.allocator, elt) catch unreachable;
+    self.nodes = self.node_list.slice();
+    self.lists.items[cell].prepend(index, self.nodes.items(.next));
+}
+
+fn removeFromCell(self: *Grid, cell: Index, entity: Index) void {
+    var lists = self.lists.items;
+    var next = self.nodes.items(.next);
+    var entities = self.nodes.items(.entity);
+    var node = lists[cell].getFirst().?;
+    var prev_idx: ?Index = null;
+    while (entities[node] != entity) {
+        prev_idx = node;
+        node = Node.getNext(node, next).?;
+    }
+    if (prev_idx) |prev| {
+        next[prev] = next[node];
+    } else {
+        lists[cell].first = next[node];
     }
 }
 
-fn posToGridXOrNull(self: Grid, pos: Vec2) ?u32 {
-    const local_x = pos.x - self.pos.x;
+pub fn query(grid: *Grid, m_pos: Vec2, h_size: Vec2, entity: u32, callback: anytype) void {
+    const CallBackType = std.meta.Child(@TypeOf(callback));
+    if (!@hasDecl(CallBackType, "onOverlap")) {
+        @compileError("Expect " ++ @typeName(@TypeOf(callback)) ++ " has onCallback function");
+    }
+    const have_filter = @hasDecl(CallBackType, "filter");
+    const f_size = h_size.add(grid.h_size);
+    const begin_x = grid.posToGridX(m_pos.x - f_size.x);
+    const end_x = grid.posToGridX(m_pos.x + f_size.x);
+    const end_y = grid.posToGridY(m_pos.y + f_size.y);
+    var current_y = grid.posToGridY(m_pos.y - f_size.y);
+    const lists = grid.lists.items;
+    const next = grid.nodes.items(.next);
+    const entities = grid.nodes.items(.entity);
+    const positions = grid.nodes.items(.m_pos);
+    while (current_y <= end_y) : (current_y += 1) {
+        var current_x = begin_x;
+        while (current_x <= end_x) : (current_x += 1) {
+            const cell = grid.cellIndex(current_x, current_y);
+            var current_idx = lists[cell].getFirst();
+            while (current_idx) |value| : (current_idx = Node.getNext(value, next)) {
+                if (entities[value] != entity) {
+                    if (have_filter) {
+                        if (!callback.filter(entities[value], entity)) continue;
+                    }
+
+                    if (std.math.fabs(m_pos.x - positions[value].x) <= f_size.x and
+                        std.math.fabs(m_pos.y - positions[value].y) <= f_size.y)
+                    {
+                        callback.onOverlap(entities[value]);
+                    }
+                }
+            }
+        }
+    }
+}
+fn posToCell(self: Grid, pos: Vec2) u32 {
+    const x = self.posToGridX(pos.x);
+    const y = self.posToGridY(pos.y);
+    return self.cellIndex(x, y);
+}
+fn posToCellOrNull(self: Grid, pos: Vec2) ?u32 {
+    const x = self.posToGridXOrNull(pos.x) orelse return null;
+    const y = self.posToGridYOrNull(pos.y) orelse return null;
+    return self.cellIndex(x, y);
+}
+
+fn posToGridXOrNull(self: Grid, x: f32) ?u32 {
+    const local_x = x - self.pos.x;
     return self.localPosToIdxOrNull(local_x, self.num_rows);
 }
 
-fn posToGridYOrNull(self: Grid, pos: Vec2) ?u32 {
-    const local_y = pos.y - self.pos.y;
+fn posToGridYOrNull(self: Grid, y: f32) ?u32 {
+    const local_y = y - self.pos.y;
     return self.localPosToIdxOrNull(local_y, self.num_cols);
 }
 
@@ -281,28 +235,23 @@ fn localPosToIdxOrNull(self: Grid, value: f32, cells: u32) ?u32 {
     return if (idx < cells) idx else null;
 }
 
-fn posToGridXClamp(self: Grid, pos: Vec2) u32 {
-    const local_x = pos.x - self.pos.x;
-    return self.localPosToIdxClamp(local_x, self.num_rows);
+fn posToGridX(self: Grid, x: f32) u32 {
+    const local_x = x - self.pos.x;
+    return self.localPosToIdx(local_x, self.num_rows);
 }
 
-fn posToGridYClamp(self: Grid, pos: Vec2) u32 {
-    const local_y = pos.y - self.pos.y;
-    return self.localPosToIdxClamp(local_y, self.num_cols);
+fn posToGridY(self: Grid, y: f32) u32 {
+    const local_y = y - self.pos.y;
+    return self.localPosToIdx(local_y, self.num_cols);
 }
 
-fn localPosToIdxClamp(self: Grid, value: f32, cells: u32) u32 {
+fn localPosToIdx(self: Grid, value: f32, cells: u32) u32 {
     if (value < 0) return 0;
     return std.math.min(@floatToInt(u32, value * self.inv_cells_size), cells - 1);
 }
 
-fn debugPrint(grid: Grid) void {
-    var total: u32 = 0;
-    for (grid.rows.items) |row| {
-        std.debug.print("{},", .{row.total});
-        total += row.total;
-    }
-    std.debug.print("\ntotal {}\n", .{total});
+fn cellIndex(self: Grid, grid_x: u32, grid_y: u32) u32 {
+    return grid_y * self.num_rows + grid_x;
 }
 
 test "cell index" {
@@ -315,15 +264,14 @@ test "cell index" {
         2,
         2,
     );
-    defer grid.deinit();
-    // try testing.expectEqual(grid.posToCell(Vec2.new(0 * scale, 0 * scale)), 0);
-    // try testing.expectEqual(grid.posToCell(Vec2.new(0 * scale, 1 * scale)), 2);
-    // try testing.expectEqual(grid.posToCell(Vec2.new(1 * scale, 0 * scale)), 1);
-    // try testing.expectEqual(grid.posToCell(Vec2.new(1 * scale, 1 * scale)), 3);
-    // try testing.expectEqual(grid.posToCell(Vec2.new(-1 * scale, -1 * scale)), 0);
-    // try testing.expectEqual(grid.posToCell(Vec2.new(2 * scale, 0 * scale)), 1);
-    // try testing.expectEqual(grid.posToCell(Vec2.new(0 * scale, 2 * scale)), 2);
-    // try testing.expectEqual(grid.posToCell(Vec2.new(2 * scale, 2 * scale)), 3);
+    try testing.expectEqual(grid.posToCell(Vec2.new(0 * scale, 0 * scale)), 0);
+    try testing.expectEqual(grid.posToCell(Vec2.new(0 * scale, 1 * scale)), 2);
+    try testing.expectEqual(grid.posToCell(Vec2.new(1 * scale, 0 * scale)), 1);
+    try testing.expectEqual(grid.posToCell(Vec2.new(1 * scale, 1 * scale)), 3);
+    try testing.expectEqual(grid.posToCell(Vec2.new(-1 * scale, -1 * scale)), 0);
+    try testing.expectEqual(grid.posToCell(Vec2.new(2 * scale, 0 * scale)), 1);
+    try testing.expectEqual(grid.posToCell(Vec2.new(0 * scale, 2 * scale)), 2);
+    try testing.expectEqual(grid.posToCell(Vec2.new(2 * scale, 2 * scale)), 3);
 }
 
 test "Performance\n" {
@@ -334,7 +282,7 @@ test "Performance\n" {
     const x = 100;
     const y = 100;
     const size = 4;
-    const total = x * y * 8;
+    const total = x * y * 20;
     var random = std.rand.Xoshiro256.init(0).random();
     const Entity = std.MultiArrayList(struct {
         entity: u32,
@@ -353,7 +301,7 @@ test "Performance\n" {
     defer grid.deinit();
     var manager = Entity{};
     defer manager.deinit(allocator);
-    try manager.setCapacity(allocator, x * y);
+    try manager.setCapacity(allocator, total);
     {
         var entity: u32 = 0;
         while (entity < total) : (entity += 1) {
@@ -367,6 +315,7 @@ test "Performance\n" {
             });
         }
     }
+
     var slice = manager.slice();
     var entities = slice.items(.entity);
     var position = slice.items(.pos);
@@ -423,6 +372,4 @@ test "Performance\n" {
     }
     std.debug.print("move take {}ms\n", .{move_time / total_loop});
     std.debug.print("query take {}ms\n", .{query_time / total_loop});
-
-    // grid.debugPrint();
 }
