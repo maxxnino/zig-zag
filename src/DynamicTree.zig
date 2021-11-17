@@ -2,25 +2,26 @@ const std = @import("std");
 const log = std.log.scoped(.dynamic_tree);
 const assert = std.debug.assert;
 const basic_type = @import("basic_type.zig");
-
+const IndexLinkList = @import("IndexLinkList.zig");
 const Rect = basic_type.Rect;
 const Vec2 = basic_type.Vec2;
-const Index = u32;
+const Index = basic_type.Index;
+const node_null = basic_type.node_null;
 
 const DynamicTree = @This();
 const Node = struct {
     child1: Index = node_null,
     child2: Index = node_null,
+    entity: Index = node_null,
     parent: Index = node_null,
     height: i16 = 0,
     aabb: Rect = Rect.zero(),
 };
 
 const NodeList = std.MultiArrayList(Node);
-const node_null = std.math.maxInt(Index);
 
 root: Index,
-free_list: Index,
+free_list: IndexLinkList,
 node_list: NodeList,
 nodes: NodeList.Slice,
 allocator: *std.mem.Allocator,
@@ -29,7 +30,7 @@ pub fn init(allocator: *std.mem.Allocator) DynamicTree {
     var node_list = NodeList{};
     return .{
         .root = node_null,
-        .free_list = node_null,
+        .free_list = IndexLinkList{},
         .node_list = NodeList{},
         .nodes = node_list.slice(),
         .allocator = allocator,
@@ -40,22 +41,29 @@ pub fn deinit(self: *DynamicTree) void {
     self.node_list.deinit(self.allocator);
 }
 
-pub fn query(self: DynamicTree, aabb: Rect, allocator: *std.mem.Allocator, callback: anytype) !void {
-    if (!@hasDecl(std.meta.Child(@TypeOf(callback)), "onOverlap")) {
+pub fn query(self: DynamicTree, aabb: Rect, entity: u32, allocator: *std.mem.Allocator, callback: anytype) !void {
+    const CallBackType = std.meta.Child(@TypeOf(callback));
+    if (!@hasDecl(CallBackType, "onOverlap")) {
         @compileError("Expect " ++ @typeName(@TypeOf(callback)) ++ " has onCallback function");
     }
+    const have_filter = @hasDecl(CallBackType, "filter");
     var stack = std.ArrayList(Index).init(allocator);
     defer stack.deinit();
     try stack.append(self.root);
     const aabbs = self.nodes.items(.aabb);
     const child1s = self.nodes.items(.child1);
     const child2s = self.nodes.items(.child2);
+    const entities = self.nodes.items(.entity);
     while (stack.items.len > 0) {
         const node_id = stack.pop();
         if (node_id == node_null) continue;
 
         if (aabbs[node_id].testOverlap(aabb)) {
             if (isLeaf(node_id, child1s)) {
+                if (entities[node_id] == entity) continue;
+                if (have_filter) {
+                    if (!callback.filter(entities[node_id], entity)) continue;
+                }
                 callback.onOverlap(node_id);
             } else {
                 try stack.append(child1s[node_id]);
@@ -82,10 +90,11 @@ pub fn print(self: DynamicTree, extra: []const u8) void {
     std.debug.print("\n", .{});
 }
 
-pub fn addNode(self: *DynamicTree, aabb: Rect) Index {
+pub fn addNode(self: *DynamicTree, aabb: Rect, entity: Index) Index {
     const node_id = self.allocateNode();
     self.nodes.items(.aabb)[node_id] = aabb;
     self.nodes.items(.height)[node_id] = 0;
+    self.nodes.items(.entity)[node_id] = entity;
     self.insertLeaf(node_id);
     return node_id;
 }
@@ -112,7 +121,7 @@ pub fn moveNode(tree: *DynamicTree, node_id: Index, aabb: Rect) bool {
 }
 
 fn allocateNode(self: *DynamicTree) Index {
-    const node_id = self.popFreeNode();
+    const node_id = self.free_list.popFirst(self.nodes.items(.child1));
     if (node_id) |value| {
         self.node_list.set(value, .{});
         return value;
@@ -123,24 +132,10 @@ fn allocateNode(self: *DynamicTree) Index {
     return @intCast(Index, self.node_list.len - 1);
 }
 
-fn addFreeNode(self: *DynamicTree, free_node_index: Index, child1: []Index) void {
-    child1[free_node_index] = self.free_list;
-    self.free_list = free_node_index;
-}
-
-fn popFreeNode(self: *DynamicTree) ?Index {
-    if (self.free_list == node_null) return null;
-    const first = self.free_list;
-    self.free_list = self.nodes.items(.child1)[first];
-    return first;
-}
-
 fn freeNode(self: *DynamicTree, node_id: Index) void {
     // TODO: b2Assert(0 <= nodeId && nodeId < m_nodeCapacity);
-    var child1s = self.nodes.items(.child1);
     self.nodes.items(.height)[node_id] = -1;
-    child1s[node_id] = node_null;
-    self.addFreeNode(node_id, child1s);
+    self.free_list.prepend(node_id, self.nodes.items(.child1));
 }
 
 fn isLeaf(node_id: Index, child1s: []const Index) bool {
@@ -466,8 +461,8 @@ test "behavior" {
         Vec2.new(-3, -3),
         Vec2.new(2, -1),
     ));
-    for (rects.items) |entry| {
-        _ = dt.addNode(entry);
+    for (rects.items) |entry, i| {
+        _ = dt.addNode(entry, @intCast(u32, i));
     }
 
     {
@@ -481,8 +476,8 @@ test "behavior" {
         };
         var callback = QueryCallback{};
         var allocator = std.heap.FixedBufferAllocator.init(callback.buffer[0..callback.buffer.len]);
-        for (rects.items) |aabb| {
-            try dt.query(aabb, &allocator.allocator, &callback);
+        for (rects.items) |aabb, i| {
+            try dt.query(aabb, @intCast(u32, i), &allocator.allocator, &callback);
         }
     }
 }
@@ -494,12 +489,12 @@ test "Performance\n" {
     log.debug("\n", .{});
     var dt = DynamicTree.init(std.testing.allocator);
     defer dt.deinit();
-    const total = 50_000;
+    const total = 5000;
     var random = std.rand.Xoshiro256.init(0).random();
     const max_size = 20;
     const min_size = 1;
-    const max = 50_000;
-    const min = -50_000;
+    const max = 1000;
+    const min = -1000;
     var entities = std.ArrayList(Rect).init(std.testing.allocator);
     defer entities.deinit();
     try entities.ensureTotalCapacity(total);
@@ -518,7 +513,7 @@ test "Performance\n" {
                     floatFromRange(random, min_size, max_size),
                 ),
             );
-            _ = dt.addNode(aabb);
+            _ = dt.addNode(aabb, entity);
             try entities.append(aabb);
         }
         const time_0 = timer.read();
@@ -534,12 +529,16 @@ test "Performance\n" {
                 _ = entity;
                 self.total += 1;
             }
+            pub fn filter(self: @This(), e1: u32, e2: u32) bool {
+                _ = self;
+                return e1 < e2;
+            }
         };
         var callback = QueryCallback{};
         var allocator = std.heap.FixedBufferAllocator.init(callback.buffer[0..callback.buffer.len]);
         var timer = try std.time.Timer.start();
-        for (entities.items) |aabb| {
-            try dt.query(aabb, &allocator.allocator, &callback);
+        for (entities.items) |aabb, i| {
+            try dt.query(aabb, @intCast(u32, i), &allocator.allocator, &callback);
         }
         var time_0 = timer.read();
         std.debug.print("callback query {} entity, with {} callback take {}ms\n", .{

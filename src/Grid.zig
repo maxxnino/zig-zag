@@ -3,11 +3,12 @@ const basic_type = @import("basic_type.zig");
 const assert = std.debug.assert;
 const testing = std.testing;
 const log = std.log.scoped(.grid);
+const IndexLinkList = @import("IndexLinkList.zig");
 
-const Index = u32;
+const node_null = basic_type.node_null;
+const Index = basic_type.Index;
 const Grid = @This();
 const Vec2 = basic_type.Vec2;
-const node_null = std.math.maxInt(Index);
 const Node = struct {
     /// Stores the next element in the cell.
     next: u32,
@@ -31,26 +32,6 @@ const Node = struct {
     }
 };
 
-const IndexLinkList = struct {
-    first: u32 = node_null,
-
-    /// Insert a new node at the head.
-    pub fn prepend(list: *IndexLinkList, node: Index, next: []Index) void {
-        next[node] = list.first;
-        list.first = node;
-    }
-
-    pub fn getFirst(list: IndexLinkList) ?Index {
-        return if (list.first != node_null) list.first else null;
-    }
-
-    pub fn popFirst(list: *IndexLinkList, next: []Index) ?Index {
-        if (list.first == node_null) return null;
-        const first = list.first;
-        list.first = next[first];
-        return first;
-    }
-};
 const NodeList = std.MultiArrayList(Node);
 /// Stores the number of columns, rows, and cells in the grid.
 num_cols: u32,
@@ -118,7 +99,7 @@ pub fn insert(self: *Grid, entity: Index, pos: Vec2) !void {
 }
 
 fn ensureInitLists(self: *Grid) void {
-    if (self.nodes.len != 0) return;
+    if (self.lists.items.len != 0) return;
     self.lists.appendNTimes(.{}, self.num_rows * self.num_cols) catch unreachable;
 }
 
@@ -279,10 +260,10 @@ test "Performance\n" {
     // if (builtin.mode == .Debug) {
     //     return error.SkipZigTest;
     // }
-    const x = 100;
-    const y = 100;
+    const x = 40;
+    const y = 40;
     const size = 4;
-    const total = x * y * 20;
+    const total = x * y * 4;
     var random = std.rand.Xoshiro256.init(0).random();
     const Entity = std.MultiArrayList(struct {
         entity: u32,
