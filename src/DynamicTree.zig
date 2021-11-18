@@ -10,9 +10,9 @@ const node_null = basic_type.node_null;
 
 const DynamicTree = @This();
 const Node = struct {
+    /// If child1 == node_null, child2 is entity
     child1: Index = node_null,
     child2: Index = node_null,
-    entity: Index = node_null,
     parent: Index = node_null,
     height: i16 = 0,
     aabb: Rect = Rect.zero(),
@@ -41,30 +41,24 @@ pub fn deinit(self: *DynamicTree) void {
     self.node_list.deinit(self.allocator);
 }
 
-pub fn query(self: DynamicTree, aabb: Rect, entity: u32, allocator: *std.mem.Allocator, callback: anytype) !void {
-    const CallBackType = std.meta.Child(@TypeOf(callback));
-    if (!@hasDecl(CallBackType, "onOverlap")) {
+pub fn query(self: DynamicTree, allocator: *std.mem.Allocator, aabb: Rect, payload: anytype, callback: anytype) !void {
+    const CallBack = std.meta.Child(@TypeOf(callback));
+    if (!@hasDecl(CallBack, "onOverlap")) {
         @compileError("Expect " ++ @typeName(@TypeOf(callback)) ++ " has onCallback function");
     }
-    const have_filter = @hasDecl(CallBackType, "filter");
     var stack = std.ArrayList(Index).init(allocator);
     defer stack.deinit();
     try stack.append(self.root);
     const aabbs = self.nodes.items(.aabb);
     const child1s = self.nodes.items(.child1);
     const child2s = self.nodes.items(.child2);
-    const entities = self.nodes.items(.entity);
     while (stack.items.len > 0) {
         const node_id = stack.pop();
         if (node_id == node_null) continue;
 
         if (aabbs[node_id].testOverlap(aabb)) {
             if (isLeaf(node_id, child1s)) {
-                if (entities[node_id] == entity) continue;
-                if (have_filter) {
-                    if (!callback.filter(entities[node_id], entity)) continue;
-                }
-                callback.onOverlap(node_id);
+                callback.onOverlap(payload, child2s[node_id]);
             } else {
                 try stack.append(child1s[node_id]);
                 try stack.append(child2s[node_id]);
@@ -94,7 +88,7 @@ pub fn addNode(self: *DynamicTree, aabb: Rect, entity: Index) Index {
     const node_id = self.allocateNode();
     self.nodes.items(.aabb)[node_id] = aabb;
     self.nodes.items(.height)[node_id] = 0;
-    self.nodes.items(.entity)[node_id] = entity;
+    self.nodes.items(.child2)[node_id] = entity;
     self.insertLeaf(node_id);
     return node_id;
 }
@@ -442,42 +436,61 @@ test "behavior" {
     defer rects.deinit();
 
     try rects.append(Rect.newFromCenter(
-        Vec2.new(-1, 1),
-        Vec2.new(5, 2),
+        Vec2.new(-2, -2),
+        Vec2.new(2, 2),
     ));
     try rects.append(Rect.newFromCenter(
-        Vec2.new(-2, -7),
-        Vec2.new(9, 1),
-    ));
-    try rects.append(Rect.newFromCenter(
-        Vec2.new(-6, -5),
-        Vec2.new(-1, 2),
-    ));
-    try rects.append(Rect.newFromCenter(
-        Vec2.new(-1, -2),
-        Vec2.new(3, 0),
+        Vec2.new(-1, -1),
+        Vec2.new(3, 3),
     ));
     try rects.append(Rect.newFromCenter(
         Vec2.new(-3, -3),
-        Vec2.new(2, -1),
+        Vec2.new(4, 4),
+    ));
+    try rects.append(Rect.newFromCenter(
+        Vec2.new(2, 2),
+        Vec2.new(4, 4),
+    ));
+    try rects.append(Rect.newFromCenter(
+        Vec2.new(-3, -3),
+        Vec2.new(-1, -1),
     ));
     for (rects.items) |entry, i| {
         _ = dt.addNode(entry, @intCast(u32, i));
     }
+    const expected_output = [_]u32{
+        0, 3,
+        0, 4,
+        0, 1,
+        0, 2,
+        1, 3,
+        1, 4,
+        1, 2,
+        2, 3,
+        2, 4,
+    };
 
     {
         const QueryCallback = struct {
             const fixed_cap = 1048;
+            couter: u32 = 0,
+            array: [expected_output.len]u32 = undefined,
             buffer: [fixed_cap]u8 = undefined,
-            pub fn onOverlap(self: *@This(), entity: u32) void {
-                _ = self;
-                std.debug.print("overlap with {}\n", .{entity});
+            pub fn onOverlap(self: *@This(), payload: u32, entity: u32) void {
+                if (payload >= entity) return;
+                self.array[self.couter * 2] = payload;
+                self.array[self.couter * 2 + 1] = entity;
+                self.couter += 1;
+                // std.debug.print("{} - {}\n", .{ payload, entity });
             }
         };
         var callback = QueryCallback{};
         var allocator = std.heap.FixedBufferAllocator.init(callback.buffer[0..callback.buffer.len]);
         for (rects.items) |aabb, i| {
-            try dt.query(aabb, @intCast(u32, i), &allocator.allocator, &callback);
+            try dt.query(&allocator.allocator, aabb, @intCast(u32, i), &callback);
+        }
+        for(&expected_output) |entry, i|{
+            try std.testing.expect(entry == callback.array[i]);
         }
     }
 }
@@ -525,20 +538,16 @@ test "Performance\n" {
             const fixed_cap = 1048;
             total: u32 = 0,
             buffer: [fixed_cap]u8 = undefined,
-            pub fn onOverlap(self: *@This(), entity: u32) void {
-                _ = entity;
+            pub fn onOverlap(self: *@This(), payload: u32, entity: u32) void {
+                if (payload >= entity) return;
                 self.total += 1;
-            }
-            pub fn filter(self: @This(), e1: u32, e2: u32) bool {
-                _ = self;
-                return e1 < e2;
             }
         };
         var callback = QueryCallback{};
         var allocator = std.heap.FixedBufferAllocator.init(callback.buffer[0..callback.buffer.len]);
         var timer = try std.time.Timer.start();
         for (entities.items) |aabb, i| {
-            try dt.query(aabb, @intCast(u32, i), &allocator.allocator, &callback);
+            try dt.query(&allocator.allocator, aabb, @intCast(u32, i), &callback);
         }
         var time_0 = timer.read();
         std.debug.print("callback query {} entity, with {} callback take {}ms\n", .{
