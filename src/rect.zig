@@ -28,6 +28,13 @@ pub fn Rect(comptime T: type) type {
             };
         }
 
+        pub fn extent(self: Self, size: Vec2) Self {
+            return .{
+                .lower_bound = self.lower_bound.sub(size),
+                .upper_bound = self.upper_bound.sub(size),
+            };
+        }
+
         pub fn testOverlap(a: Self, b: Self) bool {
             const d1 = Vec2.sub(b.lower_bound, a.upper_bound);
             const d2 = Vec2.sub(a.lower_bound, b.upper_bound);
@@ -57,6 +64,22 @@ pub fn Rect(comptime T: type) type {
             const wx = self.upper_bound.x - self.lower_bound.x;
             const wy = self.upper_bound.y - self.lower_bound.y;
             return 2 * (wx + wy);
+        }
+
+        pub fn bottomLeft(self: Self) Vec2 {
+            return self.lower_bound;
+        }
+
+        pub fn topRight(self: Self) Vec2 {
+            return self.upper_bound;
+        }
+
+        pub fn bottomRight(self: Self) Vec2 {
+            return Vec2.new(self.upper_bound.x, self.lower_bound.y);
+        }
+
+        pub fn topLeft(self: Self) Vec2 {
+            return Vec2.new(self.lower_bound.x, self.upper_bound.y);
         }
 
         pub fn zero() Self {
