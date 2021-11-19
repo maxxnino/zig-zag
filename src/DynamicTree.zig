@@ -41,13 +41,12 @@ pub fn deinit(self: *DynamicTree) void {
     self.node_list.deinit(self.allocator);
 }
 
-pub fn query(self: DynamicTree, allocator: *std.mem.Allocator, aabb: Rect, payload: anytype, callback: anytype) !void {
+pub fn query(self: DynamicTree, stack: *std.ArrayList(Index), aabb: Rect, payload: anytype, callback: anytype) !void {
     const CallBack = std.meta.Child(@TypeOf(callback));
     if (!@hasDecl(CallBack, "onOverlap")) {
         @compileError("Expect " ++ @typeName(@TypeOf(callback)) ++ " has onCallback function");
     }
-    var stack = std.ArrayList(Index).init(allocator);
-    defer stack.deinit();
+    defer stack.clearRetainingCapacity();
     try stack.append(self.root);
     const aabbs = self.nodes.items(.aabb);
     const child1s = self.nodes.items(.child1);
@@ -391,7 +390,7 @@ fn removeLeaf(self: *DynamicTree, leaf: Index) void {
     }
     var parents = self.nodes.items(.parent);
     var child1s = self.nodes.items(.child1);
-    var child2s = self.nodes.items(.child2s);
+    var child2s = self.nodes.items(.child2);
     const parent = parents[leaf];
     var grand_parent = parents[parent];
     const sibling = if (child1s[parent] == leaf) child2s[parent] else child1s[parent];
@@ -485,29 +484,27 @@ test "behavior" {
             }
         };
         var callback = QueryCallback{};
-        var allocator = std.heap.FixedBufferAllocator.init(callback.buffer[0..callback.buffer.len]);
+        var stack = std.ArrayList(Index).init(std.testing.allocator);
+        defer stack.deinit();
         for (rects.items) |aabb, i| {
-            try dt.query(&allocator.allocator, aabb, @intCast(u32, i), &callback);
+            try dt.query(&stack, aabb, @intCast(u32, i), &callback);
         }
-        for(&expected_output) |entry, i|{
+        for (&expected_output) |entry, i| {
             try std.testing.expect(entry == callback.array[i]);
         }
     }
 }
-test "Performance\n" {
-    const builtin = @import("builtin");
-    if (builtin.mode == .Debug) {
-        return error.SkipZigTest;
-    }
-    log.debug("\n", .{});
+
+test "Performance" {
+    std.debug.print("\n", .{});
     var dt = DynamicTree.init(std.testing.allocator);
     defer dt.deinit();
-    const total = 5000;
+    const total = 10000;
     var random = std.rand.Xoshiro256.init(0).random();
     const max_size = 20;
     const min_size = 1;
-    const max = 1000;
-    const min = -1000;
+    const max = 3000;
+    const min = -3000;
     var entities = std.ArrayList(Rect).init(std.testing.allocator);
     defer entities.deinit();
     try entities.ensureTotalCapacity(total);
@@ -544,10 +541,11 @@ test "Performance\n" {
             }
         };
         var callback = QueryCallback{};
-        var allocator = std.heap.FixedBufferAllocator.init(callback.buffer[0..callback.buffer.len]);
+        var stack = std.ArrayList(Index).init(std.testing.allocator);
+        defer stack.deinit();
         var timer = try std.time.Timer.start();
         for (entities.items) |aabb, i| {
-            try dt.query(&allocator.allocator, aabb, @intCast(u32, i), &callback);
+            try dt.query(&stack, aabb, @intCast(u32, i), &callback);
         }
         var time_0 = timer.read();
         std.debug.print("callback query {} entity, with {} callback take {}ms\n", .{
