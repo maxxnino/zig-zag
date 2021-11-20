@@ -67,11 +67,11 @@ pub const QueryCallback = struct {
 
 const GridMap = std.AutoHashMap(i32, Grid);
 
-const cell_size: f32 = 8.0;
+const cell_size: f32 = 6.0;
 const grid_rows = 150;
 const grid_cols = 150;
-const inv_grid_w = 1.0 / (cell_size * grid_rows);
-const inv_grid_h = 1.0 / (cell_size * grid_cols);
+const inv_grid_w: f32 = 1.0 / (cell_size * grid_rows);
+const inv_grid_h: f32 = 1.0 / (cell_size * grid_cols);
 
 pub const half_element_size = Vec2.new(cell_size / 4, cell_size / 4);
 const num_cols = grid_cols;
@@ -102,7 +102,7 @@ pub fn createProxy(bp: *BroadPhase, m_pos: Vec2, h_size: Vec2, entity: Index) Pr
     switch (sizeToType(h_size)) {
         .small => {
             const grid_key = posToGridKey(m_pos);
-            bp.getOrCreateGrid(grid_key).insert(entity, m_pos);
+            bp.getOrCreateGrid(grid_key, m_pos).insert(entity, m_pos);
             return .{ .small = entity };
         },
         .big => {
@@ -133,7 +133,7 @@ pub fn moveProxy(bp: *BroadPhase, proxy: Proxy, from_pos: Vec2, to_pos: Vec2, h_
                 bp.getGrid(from_grid_key).move(entity, from_pos, to_pos);
             } else {
                 bp.getGrid(from_grid_key).remove(entity, from_pos);
-                bp.getOrCreateGrid(to_grid_key).insert(entity, to_pos);
+                bp.getOrCreateGrid(to_grid_key, to_pos).insert(entity, to_pos);
             }
         },
         .big => |node_id| {
@@ -149,16 +149,23 @@ pub fn query(
     m_pos: Vec2,
     h_size: Vec2,
     proxy: Proxy,
-    entity: Index,
-    callback: *QueryCallback,
+    payload: anytype,
+    callback: anytype,
 ) !void {
     const aabb = Rect.newFromCenter(m_pos, h_size);
     if (proxy == .big) {
-        try bp.tree.query(&callback.stack, aabb, entity, callback);
+        try bp.tree.query(&callback.stack, aabb, payload, callback);
     }
 
     const extended_aabb = aabb.extent(half_element_size);
-    bp.queryGrid(extended_aabb, m_pos, h_size, entity, callback);
+    bp.queryGrid(extended_aabb, m_pos, h_size, payload, callback);
+}
+
+pub fn userQuery(bp: *BroadPhase, m_pos: Vec2, h_size: Vec2, payload: anytype, callback: anytype) !void {
+    const aabb = Rect.newFromCenter(m_pos, h_size);
+    try bp.tree.query(&callback.stack, aabb, payload, callback);
+    const extended_aabb = aabb.extent(half_element_size);
+    bp.queryGrid(extended_aabb, m_pos, h_size, payload, callback);
 }
 
 pub fn queryGrid(
@@ -166,20 +173,20 @@ pub fn queryGrid(
     extended_aabb: Rect,
     m_pos: Vec2,
     h_size: Vec2,
-    entity: Index,
-    callback: *QueryCallback,
+    payload: anytype,
+    callback: anytype,
 ) void {
     const top_right = posToGridKey(extended_aabb.topRight());
     const bottom_left = posToGridKey(extended_aabb.bottomLeft());
 
     var bl_grid = bp.getGridOrNull(bottom_left);
     if (bl_grid) |grid| {
-        grid.query(m_pos, h_size, entity, callback);
+        grid.query(m_pos, h_size, payload, callback);
     }
 
     if (bottom_left.eql(top_right)) return;
     if (bp.getGridOrNull(top_right)) |grid| {
-        grid.query(m_pos, h_size, entity, callback);
+        grid.query(m_pos, h_size, payload, callback);
     }
 
     const top_left = posToGridKey(extended_aabb.topLeft());
@@ -187,15 +194,15 @@ pub fn queryGrid(
 
     const bottom_right = posToGridKey(extended_aabb.bottomRight());
     if (bp.getGridOrNull(bottom_right)) |grid| {
-        grid.query(m_pos, h_size, entity, callback);
+        grid.query(m_pos, h_size, payload, callback);
     }
     if (bp.getGridOrNull(top_left)) |grid| {
-        grid.query(m_pos, h_size, entity, callback);
+        grid.query(m_pos, h_size, payload, callback);
     }
 }
 
 /// TODO: split to getGrid and createGrid function?
-fn getOrCreateGrid(bp: *BroadPhase, grid_key: GridKey) *Grid {
+fn getOrCreateGrid(bp: *BroadPhase, grid_key: GridKey, m_pos: Vec2) *Grid {
     const key = grid_key.toKey();
     const node_ptr = bp.grid_map.getPtr(key);
     if (node_ptr) |node| {
@@ -203,7 +210,7 @@ fn getOrCreateGrid(bp: *BroadPhase, grid_key: GridKey) *Grid {
     }
     bp.grid_map.putNoClobber(key, Grid.init(
         bp.allocator,
-        keyToGridPos(grid_key),
+        gridPos(m_pos),
         half_element_size,
         cell_size,
         num_rows,
@@ -227,15 +234,17 @@ fn sizeToType(h_size: Vec2) EntityType {
     return if (size > half_element_size.x) .big else .small;
 }
 
-fn keyToGridPos(key: GridKey) Vec2 {
-    const grid_key = key.toVec2();
-    return Vec2.new(grid_key.x * grid_rows * cell_size, grid_key.y * grid_cols * cell_size);
+fn gridPos(pos: Vec2) Vec2 {
+    return Vec2.new(
+        @floor(pos.x * inv_grid_w) * cell_size * grid_rows,
+        @floor(pos.y * inv_grid_h) * cell_size * grid_cols,
+    );
 }
 
 fn posToGridKey(pos: Vec2) GridKey {
     return GridKey.new(
-        @floatToInt(i16, pos.x * inv_grid_w),
-        @floatToInt(i16, pos.y * inv_grid_h),
+        @floatToInt(i16, @floor(pos.x * inv_grid_w)),
+        @floatToInt(i16, @floor(pos.y * inv_grid_h)),
     );
 }
 

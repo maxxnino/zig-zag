@@ -28,10 +28,23 @@ pub fn Rect(comptime T: type) type {
             };
         }
 
+        pub fn newRectInt(m_pos: Vec2, h_size: Vec2, screen: Vec2, screen_size: Vec2) RectInt {
+            return .{
+                .lower_bound = .{
+                    .x = @floatToInt(i32, m_pos.x - screen.x + screen_size.x - h_size.x),
+                    .y = @floatToInt(i32, screen.y + screen_size.y - m_pos.y - h_size.y),
+                },
+                .upper_bound = .{
+                    .x = @floatToInt(i32, h_size.x * 2),
+                    .y = @floatToInt(i32, h_size.y * 2),
+                },
+            };
+        }
+
         pub fn extent(self: Self, size: Vec2) Self {
             return .{
                 .lower_bound = self.lower_bound.sub(size),
-                .upper_bound = self.upper_bound.sub(size),
+                .upper_bound = self.upper_bound.add(size),
             };
         }
 

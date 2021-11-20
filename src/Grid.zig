@@ -48,8 +48,6 @@ h_size: Vec2,
 pos: Vec2,
 
 // Stores the size of the grid.
-width: u32,
-height: u32,
 nodes: NodeList.Slice,
 node_list: NodeList,
 lists: std.ArrayList(IndexLinkList),
@@ -72,8 +70,6 @@ pub fn init(
         .num_rows = num_rows,
         .num_cells = num_cols * num_rows,
         .pos = position,
-        .width = num_rows * @floatToInt(u32, cell_size),
-        .height = num_cols * @floatToInt(u32, cell_size),
         .h_size = h_size,
         .lists = std.ArrayList(IndexLinkList).init(allocator),
         .nodes = node_list.slice(),
@@ -151,7 +147,7 @@ fn removeFromCell(self: *Grid, cell: Index, entity: Index) void {
     }
 }
 
-pub fn query(grid: *Grid, m_pos: Vec2, h_size: Vec2, entity: u32, callback: anytype) void {
+pub fn query(grid: *Grid, m_pos: Vec2, h_size: Vec2, entity: anytype, callback: anytype) void {
     const CallBackType = std.meta.Child(@TypeOf(callback));
     if (!@hasDecl(CallBackType, "onOverlap")) {
         @compileError("Expect " ++ @typeName(@TypeOf(callback)) ++ " has onCallback function");
@@ -172,12 +168,13 @@ pub fn query(grid: *Grid, m_pos: Vec2, h_size: Vec2, entity: u32, callback: anyt
             const cell = grid.cellIndex(current_x, current_y);
             var current_idx = lists[cell].getFirst();
             while (current_idx) |value| : (current_idx = Node.getNext(value, next)) {
-                if (entities[value] != entity) {
-                    if (std.math.fabs(m_pos.x - positions[value].x) <= f_size.x and
-                        std.math.fabs(m_pos.y - positions[value].y) <= f_size.y)
-                    {
-                        callback.onOverlap(entity, entities[value]);
-                    }
+                if (@TypeOf(entity) == u32) {
+                    if (entities[value] == entity) continue;
+                }
+                if (std.math.fabs(m_pos.x - positions[value].x) <= f_size.x and
+                    std.math.fabs(m_pos.y - positions[value].y) <= f_size.y)
+                {
+                    callback.onOverlap(entity, entities[value]);
                 }
             }
         }
@@ -191,18 +188,12 @@ fn posToCell(self: Grid, pos: Vec2) u32 {
 }
 
 fn posToGridX(self: Grid, x: f32) u32 {
-    const local_x = x - self.pos.x;
-    if (local_x < 0) {
-        std.debug.print("x: {}, pos: {}\n", .{ @floatToInt(i32, x), @floatToInt(i32, self.pos.x) });
-    }
+    const local_x = @floor(x) - self.pos.x;
     return self.localPosToIdx(local_x, self.num_rows);
 }
 
 fn posToGridY(self: Grid, y: f32) u32 {
-    const local_y = y - self.pos.y;
-    if (local_y < 0) {
-        std.debug.print("y: {}, pos: {}\n", .{ @floatToInt(i32, y), @floatToInt(i32, self.pos.y) });
-    }
+    const local_y = @floor(y) - self.pos.y;
     return self.localPosToIdx(local_y, self.num_cols);
 }
 
@@ -225,7 +216,10 @@ fn posToGridYClamp(self: Grid, y: f32) u32 {
 
 fn localPosToIdxClamp(self: Grid, value: f32, cells: u32) u32 {
     if (value < 0) return 0;
-    return std.math.min(@floatToInt(u32, value * self.inv_cells_size), cells - 1);
+    return std.math.min(
+        @floatToInt(u32, value * self.inv_cells_size),
+        cells - 1,
+    );
 }
 fn cellIndex(self: Grid, grid_x: u32, grid_y: u32) u32 {
     return grid_y * self.num_rows + grid_x;
