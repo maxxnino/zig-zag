@@ -10,6 +10,7 @@ const node_null = basic_type.node_null;
 const Index = basic_type.Index;
 const Grid = @This();
 const Vec2 = basic_type.Vec2;
+const Vec2u32 = basic_type.Vec2u32;
 const Node = struct {
     /// Stores the next element in the cell.
     next: Index,
@@ -35,9 +36,9 @@ const Node = struct {
 
 const NodeList = std.MultiArrayList(Node);
 /// Stores the number of columns, rows, and cells in the grid.
-num_cols: u32,
-num_rows: u32,
-num_cells: u32,
+grid_dim: Vec2u32,
+grid_dim_one: Vec2u32,
+grid_dim_min: Vec2u32,
 
 // Stores the inverse size of a cell.
 inv_cells_size: f32,
@@ -49,8 +50,6 @@ h_size: Vec2,
 pos: Vec2,
 
 // Stores the size of the grid.
-width: u32,
-height: u32,
 nodes: NodeList.Slice,
 node_list: NodeList,
 lists: std.ArrayList(IndexLinkList),
@@ -63,18 +62,15 @@ pub fn init(
     position: Vec2,
     h_size: Vec2,
     cell_size: f32,
-    num_cols: u32,
     num_rows: u32,
 ) Grid {
     var node_list = NodeList{};
     return .{
         .inv_cells_size = 1.0 / cell_size,
-        .num_cols = num_cols,
-        .num_rows = num_rows,
-        .num_cells = num_cols * num_rows,
+        .grid_dim = Vec2u32.set(num_rows),
+        .grid_dim_one = Vec2u32.new(num_rows, 1),
+        .grid_dim_min = Vec2u32.set(num_rows - 1),
         .pos = position,
-        .width = num_rows * @floatToInt(u32, @floor(cell_size)),
-        .height = num_cols * @floatToInt(u32, @floor(cell_size)),
         .h_size = h_size,
         .lists = std.ArrayList(IndexLinkList).init(allocator),
         .nodes = node_list.slice(),
@@ -91,7 +87,7 @@ pub fn deinit(self: *Grid) void {
 
 pub fn insert(self: *Grid, entity: Index, pos: Vec2) void {
     self.ensureInitLists();
-    const cell = self.posToCell(pos);
+    const cell = self.posToCellUnSafe(pos);
     self.insertToCell(cell, Node{
         .next = node_null,
         .entity = entity,
@@ -101,17 +97,17 @@ pub fn insert(self: *Grid, entity: Index, pos: Vec2) void {
 
 fn ensureInitLists(self: *Grid) void {
     if (self.lists.items.len != 0) return;
-    self.lists.appendNTimes(.{}, self.num_rows * self.num_cols) catch unreachable;
+    self.lists.appendNTimes(.{}, self.grid_dim.x() * self.grid_dim.y()) catch unreachable;
 }
 
 pub fn remove(self: *Grid, entity: Index, m_pos: Vec2) void {
-    const cell = self.posToCell(m_pos);
+    const cell = self.posToCellUnSafe(m_pos);
     self.removeFromCell(cell, entity);
 }
 
 pub fn move(self: *Grid, entity: Index, from_pos: Vec2, to_pos: Vec2) void {
-    var from_cell = self.posToCell(from_pos);
-    var to_cell = self.posToCell(to_pos);
+    var from_cell = self.posToCellUnSafe(from_pos);
+    var to_cell = self.posToCellUnSafe(to_pos);
     if (from_cell == to_cell) return;
     self.removeFromCell(from_cell, entity);
     self.insertToCell(to_cell, Node{
@@ -193,36 +189,31 @@ pub fn query(grid: *Grid, m_pos: Vec2, h_size: Vec2, entity: anytype, callback: 
     }
 }
 
-fn posToCell(self: Grid, pos: Vec2) u32 {
-    const idx = self.posToGridUnSafe(pos);
-    assert(@reduce(.And, idx.data < @Vector(2, u32){ self.num_rows, self.num_cols }));
-    return self.cellIndex(idx.x(), idx.y());
+fn posToCellUnSafe(self: Grid, pos: Vec2) u32 {
+    return pos.sub(self.pos)
+        .scale(self.inv_cells_size)
+        .cast(u32)
+        .dot(self.grid_dim_one);
 }
 
-fn posToGridUnSafe(self: Grid, pos: Vec2) za.GenericVector(2, u32) {
-    const local = (Vec2{ .data = @floor(pos.data) }).sub(self.pos);
-    return local.scale(self.inv_cells_size).cast(u32);
-}
-
-fn posToGrid(self: Grid, pos: Vec2) za.GenericVector(2, u32) {
-    const idx = self.posToGridUnSafe(pos);
-    return .{ .data = @maximum(
-        @minimum(idx.data, @Vector(2, u32){ self.num_rows - 1, self.num_rows - 1 }),
-        @splat(2, @as(u32, 0)),
-    ) };
+fn posToGrid(self: Grid, pos: Vec2) Vec2u32 {
+    return pos.sub(self.pos)
+        .scale(self.inv_cells_size)
+        .max(Vec2.set(0))
+        .cast(u32)
+        .min(self.grid_dim_min);
 }
 
 fn cellIndex(self: Grid, grid_x: u32, grid_y: u32) u32 {
-    return grid_x * self.num_rows + grid_y;
+    return Vec2u32.new(grid_x, grid_y).dot(self.grid_dim_one);
 }
 
 test "Performance" {
     std.debug.print("\n", .{});
     const x = 100;
-    const y = 100;
     const size = 4;
     const h_size = @intToFloat(f32, size) / 4;
-    const total = x * y * 4;
+    const total = x * x * 4;
     var random = std.rand.Xoshiro256.init(0).random();
     const Entity = std.MultiArrayList(struct {
         entity: u32,
@@ -236,7 +227,6 @@ test "Performance" {
         Vec2.new(h_size, h_size),
         size,
         x,
-        y,
     );
     defer grid.deinit();
     var manager = Entity{};
@@ -246,7 +236,7 @@ test "Performance" {
         var entity: u32 = 0;
         while (entity < total) : (entity += 1) {
             const x_pos = random.float(f32) * @intToFloat(f32, x * size);
-            const y_pos = random.float(f32) * @intToFloat(f32, y * size);
+            const y_pos = random.float(f32) * @intToFloat(f32, x * size);
             const pos = Vec2.new(x_pos, y_pos);
             manager.appendAssumeCapacity(.{
                 .entity = entity,
@@ -279,7 +269,7 @@ test "Performance" {
             var entity: u32 = 0;
             while (entity < total) : (entity += 1) {
                 const x_pos = random.float(f32) * @intToFloat(f32, x * size);
-                const y_pos = random.float(f32) * @intToFloat(f32, y * size);
+                const y_pos = random.float(f32) * @intToFloat(f32, x * size);
                 const pos = Vec2.new(x_pos, y_pos);
                 grid.move(entities[entity], position[entity], pos);
                 position[entity] = pos;
