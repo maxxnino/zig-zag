@@ -1,7 +1,0 @@
-deps:
-  zalgebra:
-    src:
-      github:
-        user: kooparse
-        repo: zalgebra
-        ref: main

@@ -1,0 +1,3 @@
+[submodule "libs/zalgebra"]
+	path = libs/zalgebra
+	url = https://github.com/kooparse/zalgebra
