@@ -24,9 +24,9 @@ root: Index,
 free_list: IndexLinkList,
 node_list: NodeList,
 nodes: NodeList.Slice,
-allocator: *std.mem.Allocator,
+allocator: std.mem.Allocator,
 
-pub fn init(allocator: *std.mem.Allocator) DynamicTree {
+pub fn init(allocator: std.mem.Allocator) DynamicTree {
     var node_list = NodeList{};
     return .{
         .root = node_null,
@@ -524,7 +524,7 @@ test "Performance" {
                 ),
             );
             _ = dt.addNode(aabb, entity);
-            try entities.append(aabb);
+            entities.appendAssumeCapacity(aabb);
         }
         const time_0 = timer.read();
         std.debug.print("add {} entity take {}ms\n", .{ total, time_0 / std.time.ns_per_ms });

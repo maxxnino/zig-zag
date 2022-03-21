@@ -1,5 +1,6 @@
 const std = @import("std");
 const basic_type = @import("basic_type.zig");
+const za = @import("zalgebra");
 const assert = std.debug.assert;
 const testing = std.testing;
 const log = std.log.scoped(.grid);
@@ -48,15 +49,17 @@ h_size: Vec2,
 pos: Vec2,
 
 // Stores the size of the grid.
+width: u32,
+height: u32,
 nodes: NodeList.Slice,
 node_list: NodeList,
 lists: std.ArrayList(IndexLinkList),
 free_list: IndexLinkList,
-allocator: *std.mem.Allocator,
+allocator: std.mem.Allocator,
 
 pub const InitInfo = struct {};
 pub fn init(
-    allocator: *std.mem.Allocator,
+    allocator: std.mem.Allocator,
     position: Vec2,
     h_size: Vec2,
     cell_size: f32,
@@ -70,6 +73,8 @@ pub fn init(
         .num_rows = num_rows,
         .num_cells = num_cols * num_rows,
         .pos = position,
+        .width = num_rows * @floatToInt(u32, @floor(cell_size)),
+        .height = num_cols * @floatToInt(u32, @floor(cell_size)),
         .h_size = h_size,
         .lists = std.ArrayList(IndexLinkList).init(allocator),
         .nodes = node_list.slice(),
@@ -154,10 +159,18 @@ pub fn query(grid: *Grid, m_pos: Vec2, h_size: Vec2, entity: anytype, callback: 
     }
 
     const f_size = h_size.add(grid.h_size);
-    const begin_x = grid.posToGridXClamp(m_pos.x - f_size.x);
-    const end_x = grid.posToGridXClamp(m_pos.x + f_size.x);
-    const end_y = grid.posToGridYClamp(m_pos.y + f_size.y);
-    var current_y = grid.posToGridYClamp(m_pos.y - f_size.y);
+    const begin_bound = grid.posToGrid(m_pos.sub(h_size));
+    const end_bound = grid.posToGrid(m_pos.add(h_size));
+
+    // const begin_x = grid.posToGridXClamp(left_bound.x());
+    const begin_x = begin_bound.x();
+    // const end_x = grid.posToGridXClamp(right_bound.x());
+    const end_x = end_bound.x();
+    // const end_y = grid.posToGridYClamp(right_bound.y());
+    const end_y = end_bound.y();
+    // var current_y = grid.posToGridYClamp(left_bound.y());
+    var current_y = begin_bound.x();
+
     const lists = grid.lists.items;
     const next = grid.nodes.items(.next);
     const entities = grid.nodes.items(.entity);
@@ -171,9 +184,8 @@ pub fn query(grid: *Grid, m_pos: Vec2, h_size: Vec2, entity: anytype, callback: 
                 if (@TypeOf(entity) == u32) {
                     if (entities[value] == entity) continue;
                 }
-                if (std.math.fabs(m_pos.x - positions[value].x) <= f_size.x and
-                    std.math.fabs(m_pos.y - positions[value].y) <= f_size.y)
-                {
+                const distant = m_pos.sub(positions[value]);
+                if (@reduce(.And, @fabs(distant.data) < f_size.data)) {
                     callback.onOverlap(entity, entities[value]);
                 }
             }
@@ -182,47 +194,26 @@ pub fn query(grid: *Grid, m_pos: Vec2, h_size: Vec2, entity: anytype, callback: 
 }
 
 fn posToCell(self: Grid, pos: Vec2) u32 {
-    const x = self.posToGridX(pos.x);
-    const y = self.posToGridY(pos.y);
-    return self.cellIndex(x, y);
+    const idx = self.posToGridUnSafe(pos);
+    assert(@reduce(.And, idx.data < @Vector(2, u32){ self.num_rows, self.num_cols }));
+    return self.cellIndex(idx.x(), idx.y());
 }
 
-fn posToGridX(self: Grid, x: f32) u32 {
-    const local_x = @floor(x) - self.pos.x;
-    return self.localPosToIdx(local_x, self.num_rows);
+fn posToGridUnSafe(self: Grid, pos: Vec2) za.GenericVector(2, u32) {
+    const local = (Vec2{ .data = @floor(pos.data) }).sub(self.pos);
+    return local.scale(self.inv_cells_size).cast(u32);
 }
 
-fn posToGridY(self: Grid, y: f32) u32 {
-    const local_y = @floor(y) - self.pos.y;
-    return self.localPosToIdx(local_y, self.num_cols);
+fn posToGrid(self: Grid, pos: Vec2) za.GenericVector(2, u32) {
+    const idx = self.posToGridUnSafe(pos);
+    return .{ .data = @maximum(
+        @minimum(idx.data, @Vector(2, u32){ self.num_rows - 1, self.num_rows - 1 }),
+        @splat(2, @as(u32, 0)),
+    ) };
 }
 
-fn localPosToIdx(self: Grid, value: f32, cells: u32) u32 {
-    assert(value >= 0);
-    const idx = @floatToInt(u32, value * self.inv_cells_size);
-    assert(idx < cells);
-    return idx;
-}
-
-fn posToGridXClamp(self: Grid, x: f32) u32 {
-    const local_x = x - self.pos.x;
-    return self.localPosToIdxClamp(local_x, self.num_rows);
-}
-
-fn posToGridYClamp(self: Grid, y: f32) u32 {
-    const local_y = y - self.pos.y;
-    return self.localPosToIdxClamp(local_y, self.num_cols);
-}
-
-fn localPosToIdxClamp(self: Grid, value: f32, cells: u32) u32 {
-    if (value < 0) return 0;
-    return std.math.min(
-        @floatToInt(u32, value * self.inv_cells_size),
-        cells - 1,
-    );
-}
 fn cellIndex(self: Grid, grid_x: u32, grid_y: u32) u32 {
-    return grid_y * self.num_rows + grid_x;
+    return grid_x * self.num_rows + grid_y;
 }
 
 test "Performance" {
@@ -250,14 +241,14 @@ test "Performance" {
     defer grid.deinit();
     var manager = Entity{};
     defer manager.deinit(allocator);
-    try manager.setCapacity(allocator, total);
+    try manager.ensureTotalCapacity(allocator, total);
     {
         var entity: u32 = 0;
         while (entity < total) : (entity += 1) {
             const x_pos = random.float(f32) * @intToFloat(f32, x * size);
             const y_pos = random.float(f32) * @intToFloat(f32, y * size);
             const pos = Vec2.new(x_pos, y_pos);
-            try manager.append(allocator, .{
+            manager.appendAssumeCapacity(.{
                 .entity = entity,
                 .pos = pos,
                 .half_size = 1.0,

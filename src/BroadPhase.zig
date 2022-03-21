@@ -47,11 +47,17 @@ const GridKey = packed struct {
 };
 
 pub const QueryCallback = struct {
+    const Payload = union(enum) {
+        big: u32,
+        small: u32,
+    };
     stack: std.ArrayList(Index),
     total: u32 = 0,
-    pub fn init(allocator: *std.mem.Allocator) QueryCallback {
+    pairs: std.ArrayList(Index),
+    pub fn init(allocator: std.mem.Allocator) QueryCallback {
         return .{
             .stack = std.ArrayList(Index).init(allocator),
+            .pairs = std.ArrayList(Index).init(allocator),
         };
     }
 
@@ -59,15 +65,30 @@ pub const QueryCallback = struct {
         q.stack.deinit();
     }
 
-    pub fn onOverlap(self: *@This(), payload: u32, entity: u32) void {
-        if (payload >= entity) return;
-        self.total += 1;
+    pub fn onOverlap(self: *@This(), payload: Payload, entity: u32) void {
+        switch (payload) {
+            .big => |e| {
+                self.total += 1;
+                self.pairs.append(e) catch unreachable;
+                self.pairs.append(entity) catch unreachable;
+            },
+            .small => |e| {
+                if (e >= entity) return;
+                self.total += 1;
+                self.pairs.append(e) catch unreachable;
+                self.pairs.append(entity) catch unreachable;
+            },
+        }
+    }
+    pub fn reset(self: *@This()) void {
+        self.total = 0;
+        self.pairs.clearRetainingCapacity();
     }
 };
 
 const GridMap = std.AutoHashMap(i32, Grid);
 
-const cell_size: f32 = 6.0;
+const cell_size: f32 = 8.0;
 const grid_rows = 150;
 const grid_cols = 150;
 const inv_grid_w: f32 = 1.0 / (cell_size * grid_rows);
@@ -79,9 +100,9 @@ const num_rows = grid_rows;
 
 grid_map: GridMap,
 tree: DynamicTree,
-allocator: *std.mem.Allocator,
+allocator: std.mem.Allocator,
 
-pub fn init(allocator: *std.mem.Allocator) BroadPhase {
+pub fn init(allocator: std.mem.Allocator) BroadPhase {
     return .{
         .grid_map = GridMap.init(allocator),
         .tree = DynamicTree.init(allocator),
@@ -150,32 +171,37 @@ pub fn query(
     h_size: Vec2,
     proxy: Proxy,
     payload: anytype,
-    callback: anytype,
+    callback: *QueryCallback,
 ) !void {
     const aabb = Rect.newFromCenter(m_pos, h_size);
-    if (proxy == .big) {
-        try bp.tree.query(&callback.stack, aabb, payload, callback);
-    }
+    const new_payload: QueryCallback.Payload = blk: {
+        if (proxy == .big) {
+            const temp = QueryCallback.Payload{ .big = payload };
+            try bp.tree.query(&callback.stack, aabb, temp, callback);
+            break :blk temp;
+        } else {
+            break :blk .{ .small = payload };
+        }
+    };
 
-    const extended_aabb = aabb.extent(half_element_size);
-    bp.queryGrid(extended_aabb, m_pos, h_size, payload, callback);
+    bp.queryGrid(aabb, m_pos, h_size, new_payload, callback);
 }
 
 pub fn userQuery(bp: *BroadPhase, m_pos: Vec2, h_size: Vec2, payload: anytype, callback: anytype) !void {
     const aabb = Rect.newFromCenter(m_pos, h_size);
     try bp.tree.query(&callback.stack, aabb, payload, callback);
-    const extended_aabb = aabb.extent(half_element_size);
-    bp.queryGrid(extended_aabb, m_pos, h_size, payload, callback);
+    bp.queryGrid(aabb, m_pos, h_size, payload, callback);
 }
 
 pub fn queryGrid(
     bp: *BroadPhase,
-    extended_aabb: Rect,
+    aabb: Rect,
     m_pos: Vec2,
     h_size: Vec2,
     payload: anytype,
     callback: anytype,
 ) void {
+    const extended_aabb = aabb.extent(half_element_size);
     const top_right = posToGridKey(extended_aabb.topRight());
     const bottom_left = posToGridKey(extended_aabb.bottomLeft());
 
@@ -230,21 +256,21 @@ fn getGridOrNull(bp: *BroadPhase, grid_key: GridKey) ?*Grid {
 }
 
 fn sizeToType(h_size: Vec2) EntityType {
-    const size = if (h_size.x > h_size.y) h_size.x else h_size.y;
-    return if (size > half_element_size.x) .big else .small;
+    const size = if (h_size.x() > h_size.y()) h_size.x() else h_size.y();
+    return if (size >= half_element_size.x() * 2) .big else .small;
 }
 
 fn gridPos(pos: Vec2) Vec2 {
     return Vec2.new(
-        @floor(pos.x * inv_grid_w) * cell_size * grid_rows,
-        @floor(pos.y * inv_grid_h) * cell_size * grid_cols,
+        @floor(pos.x() * inv_grid_w) * cell_size * grid_rows,
+        @floor(pos.y() * inv_grid_h) * cell_size * grid_cols,
     );
 }
 
 fn posToGridKey(pos: Vec2) GridKey {
     return GridKey.new(
-        @floatToInt(i16, @floor(pos.x * inv_grid_w)),
-        @floatToInt(i16, @floor(pos.y * inv_grid_h)),
+        @floatToInt(i16, @floor(pos.x() * inv_grid_w)),
+        @floatToInt(i16, @floor(pos.y() * inv_grid_h)),
     );
 }
 
@@ -277,19 +303,19 @@ test "Behavior" {
     const min_size: f32 = 5.0;
     const max_size: f32 = 50;
     // bp.preCreateGrid(Vec2.zero(), Vec2.new(max_x, max_x));
-    try manager.setCapacity(allocator, total_big + total_small);
+    try manager.ensureTotalCapacity(allocator, total_big + total_small);
     // Init entities
     {
         var entity: u32 = 0;
         while (entity < total_small) : (entity += 1) {
-            try manager.append(allocator, .{
+            manager.appendAssumeCapacity(.{
                 .entity = entity,
                 .pos = randomPos(random, 0, max_x),
                 .half_size = BroadPhase.half_element_size,
             });
         }
         while (entity < total_small + total_big) : (entity += 1) {
-            try manager.append(allocator, .{
+            manager.appendAssumeCapacity(.{
                 .entity = entity,
                 .pos = randomPos(random, 0, max_x),
                 .half_size = randomPos(random, min_size, max_size),
